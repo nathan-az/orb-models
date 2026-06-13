@@ -6,6 +6,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from orb_models.common.models.gns import ConditioningType
+from orb_models.common.models.jax import segment_ops
 from orb_models.common.models.jax.nn_utils import MLPAndLayerNorm
 
 
@@ -52,14 +53,14 @@ class Encoder(eqx.Module):
 
 
 class AttentionInteractionNetwork(eqx.Module):
-    node_mlp: MLPAndLayerNorm
-    edge_mlp: MLPAndLayerNorm
-    receive_attn: eqx.nn.Linear
-    send_attn: eqx.nn.Linear
-    cond_node_proj: eqx.nn.Linear | None
-    cond_edge_proj: eqx.nn.Linear | None
-    attention_gate: str = eqx.field(static=True)
-    distance_cutoff: bool = eqx.field(static=True)
+    _node_mlp: MLPAndLayerNorm
+    _edge_mlp: MLPAndLayerNorm
+    _receive_attn: eqx.nn.Linear
+    _send_attn: eqx.nn.Linear
+    _cond_node_proj: eqx.nn.Linear | None
+    _cond_edge_proj: eqx.nn.Linear | None
+    _attention_gate: str = eqx.field(static=True)
+    _distance_cutoff: bool = eqx.field(static=True)
     latent_dim: int = eqx.field(static=True)
     _node_cond: str = eqx.field(static=True)
     _edge_cond: str = eqx.field(static=True)
@@ -96,7 +97,7 @@ class AttentionInteractionNetwork(eqx.Module):
         node_mlp_cond_dim = latent_dim if self._node_cond == "concatenative" else 0
         edge_mlp_cond_dim = latent_dim if self._edge_cond == "concatenative" else 0
 
-        self.node_mlp = MLPAndLayerNorm(
+        self._node_mlp = MLPAndLayerNorm(
             latent_dim * 3 + node_mlp_cond_dim,
             latent_dim,
             mlp_hidden_dim,
@@ -106,7 +107,7 @@ class AttentionInteractionNetwork(eqx.Module):
             norm_type=mlp_norm,
             dropout=dropout,
         )
-        self.edge_mlp = MLPAndLayerNorm(
+        self._edge_mlp = MLPAndLayerNorm(
             latent_dim * 3 + edge_mlp_cond_dim + 2 * node_mlp_cond_dim,
             latent_dim,
             mlp_hidden_dim,
@@ -116,8 +117,8 @@ class AttentionInteractionNetwork(eqx.Module):
             norm_type=mlp_norm,
             dropout=dropout,
         )
-        self.receive_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[2])
-        self.send_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[3])
+        self._receive_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[2])
+        self._send_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[3])
 
         if self._node_cond != "none":
             self._cond_node_proj = eqx.nn.Linear(latent_dim, latent_dim, key=keys[4])
@@ -149,3 +150,51 @@ class AttentionInteractionNetwork(eqx.Module):
                 edges = edges + self._cond_edge_proj(cond_edges)
         elif self._edge_cond == "concatenative" and cond_edges is not None:
             edges = jnp.concatenate([edges, self._cond_edge_proj(cond_edges)], axis=-1)
+
+        if self._edge_cond == "softmax":
+            num_segments = nodes.shape[0]
+            receive_attn = segment_ops.segment_softmax(
+                self._receive_attn(edges),
+                receivers,
+                num_segments,
+                weights=cutoff if self._distance_cutoff else None,
+            )
+            send_attn = segment_ops.segment_softmax(
+                self._send_attn(edges),
+                senders,
+                num_segments,
+                weights=cutoff if self._distance_cutoff else None,
+            )
+        else:
+            receive_attn = jax.nn.sigmoid(self._receive_attn(edges))
+            send_attn = jax.nn.sigmoid(self._send_attn(edges))
+
+        if self._distance_cutoff:
+            receive_attn = receive_attn * cutoff
+            send_attn = send_attn * cutoff
+
+        sent_attributes = nodes[senders]
+        received_attributes = nodes[receivers]
+        edge_features = jnp.concatenate([edges, sent_attributes, received_attributes], axis=-1)
+        updated_edges = self._edge_mlp(edge_features)
+
+        sent_attributes = jax.ops.segment_sum(
+            updated_edges * send_attn, senders, nodes.shape[0]
+        )
+        received_attributes = jax.ops.segment_sum(
+            updated_edges * receive_attn, receivers, nodes.shape[0]
+        )
+
+        node_features = jnp.concatenate([nodes, received_attributes, sent_attributes], axis=-1)
+        updated_nodes = self._node_mlp(node_features)
+
+        if self._node_cond == "concatenative":
+            nodes = nodes[:, : self.latent_dim]
+        if self._edge_cond == "concatenative":
+            edges = edges[:, : self.latent_dim]
+
+        nodes = nodes + updated_nodes
+        edges = edges + updated_edges
+
+        return nodes, edges
+        
