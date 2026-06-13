@@ -12,7 +12,7 @@ def segment_softmax(
     data = data - data_max[segment_ids]
     exp = jnp.exp(data)
     if weights is not None:
-        data = data * weights
+        exp = exp * weights
     expsums = jax.ops.segment_sum(exp, segment_ids, num_segments)
     denominators = expsums[segment_ids]
     probs = jnp.where(denominators == 0, 0, exp / denominators)

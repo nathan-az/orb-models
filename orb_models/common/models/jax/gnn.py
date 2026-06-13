@@ -34,7 +34,7 @@ class Encoder(eqx.Module):
             num_mlp_layers,
             key_nodes,
             activation=activation,
-            mlp_norm=mlp_norm,
+            norm_type=mlp_norm,
         )
         self.edge_fn = MLPAndLayerNorm(
             num_edge_in_features,
@@ -43,7 +43,7 @@ class Encoder(eqx.Module):
             num_mlp_layers,
             key_edges,
             activation=activation,
-            mlp_norm=mlp_norm,
+            norm_type=mlp_norm,
         )
 
     def __call__(self, node_features, edge_features):
@@ -122,8 +122,12 @@ class AttentionInteractionNetwork(eqx.Module):
 
         if self._node_cond != "none":
             self._cond_node_proj = eqx.nn.Linear(latent_dim, latent_dim, key=keys[4])
+        else:
+            self._cond_node_proj = None
         if self._edge_cond != "none":
             self._cond_edge_proj = eqx.nn.Linear(latent_dim, latent_dim, key=keys[5])
+        else:
+            self._cond_edge_proj = None
 
         self._distance_cutoff = distance_cutoff
         self._attention_gate = attention_gate

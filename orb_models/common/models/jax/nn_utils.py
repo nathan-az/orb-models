@@ -46,13 +46,13 @@ class MLP(eqx.Module):
 
         layers = []
         for i in range(len(layer_sizes) - 1):
-            if dropout > 0.0:
+            if dropout is not None and dropout > 0.0:
                 layers.append(eqx.nn.Dropout(dropout))
             layers.append(eqx.nn.Linear(layer_sizes[i], layer_sizes[i + 1], key=linear_keys[i]))
             layers.append(activations[i])
         self.layers = layers
 
-    def __call__(self, x: jax.Array, *, key: jax.random.KeyArray) -> jax.Array:
+    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
         n_dropout = sum(isinstance(layer, eqx.nn.Dropout) for layer in self.layers)
         if n_dropout > 0:
             keys = jax.random.split(key, n_dropout)
@@ -88,7 +88,7 @@ class MLPAndLayerNorm(eqx.Module):
         norm_fn = get_layer_norm(norm_type)
         self.layer_norm = norm_fn(out_dim)
 
-    def __call__(self, x: jax.Array, *, key: jax.random.KeyArray) -> jax.Array:
+    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
         x = self.mlp(x, key=key)
         x = self.layer_norm(x)
         return x
