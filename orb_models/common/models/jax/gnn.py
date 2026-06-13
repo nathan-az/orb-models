@@ -7,7 +7,7 @@ import jax
 import jax.numpy as jnp
 from orb_models.common.models.gns import ConditioningType
 from orb_models.common.models.jax import segment_ops
-from orb_models.common.models.jax.nn_utils import MLPAndLayerNorm
+from orb_models.common.models.jax.nn_utils import MLPAndLayerNorm, TensorLinear
 
 
 class Encoder(eqx.Module):
@@ -55,10 +55,10 @@ class Encoder(eqx.Module):
 class AttentionInteractionNetwork(eqx.Module):
     _node_mlp: MLPAndLayerNorm
     _edge_mlp: MLPAndLayerNorm
-    _receive_attn: eqx.nn.Linear
-    _send_attn: eqx.nn.Linear
-    _cond_node_proj: eqx.nn.Linear | None
-    _cond_edge_proj: eqx.nn.Linear | None
+    _receive_attn: TensorLinear
+    _send_attn: TensorLinear
+    _cond_node_proj: TensorLinear | None
+    _cond_edge_proj: TensorLinear | None
     _attention_gate: str = eqx.field(static=True)
     _distance_cutoff: bool = eqx.field(static=True)
     latent_dim: int = eqx.field(static=True)
@@ -117,15 +117,15 @@ class AttentionInteractionNetwork(eqx.Module):
             norm_type=mlp_norm,
             dropout=dropout,
         )
-        self._receive_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[2])
-        self._send_attn = eqx.nn.Linear(latent_dim + edge_mlp_cond_dim, 1, key=keys[3])
+        self._receive_attn = TensorLinear(latent_dim + edge_mlp_cond_dim, 1, key=keys[2])
+        self._send_attn = TensorLinear(latent_dim + edge_mlp_cond_dim, 1, key=keys[3])
 
         if self._node_cond != "none":
-            self._cond_node_proj = eqx.nn.Linear(latent_dim, latent_dim, key=keys[4])
+            self._cond_node_proj = TensorLinear(latent_dim, latent_dim, key=keys[4])
         else:
             self._cond_node_proj = None
         if self._edge_cond != "none":
-            self._cond_edge_proj = eqx.nn.Linear(latent_dim, latent_dim, key=keys[5])
+            self._cond_edge_proj = TensorLinear(latent_dim, latent_dim, key=keys[5])
         else:
             self._cond_edge_proj = None
 

@@ -23,6 +23,24 @@ def get_layer_norm(norm_type: str):
     return norm
 
 
+def tensor_linear(linear: eqx.nn.Linear, x: jax.Array) -> jax.Array:
+    """Apply a linear layer to a tensor-shaped input."""
+    fn = linear
+    for _ in range(x.ndim-1):
+        fn = jax.vmap(fn)
+    return fn(x)
+
+
+class TensorLinear(eqx.Module):
+    linear: eqx.nn.Linear
+
+    def __init__(self, in_features: int, out_features: int, key):
+        self.linear = eqx.nn.Linear(in_features, out_features, key=key)
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return tensor_linear(self.linear, x)
+
+
 class MLP(eqx.Module):
     layers: list[eqx.Module]
 
@@ -48,7 +66,7 @@ class MLP(eqx.Module):
         for i in range(len(layer_sizes) - 1):
             if dropout is not None and dropout > 0.0:
                 layers.append(eqx.nn.Dropout(dropout))
-            layers.append(eqx.nn.Linear(layer_sizes[i], layer_sizes[i + 1], key=linear_keys[i]))
+            layers.append(TensorLinear(layer_sizes[i], layer_sizes[i + 1], key=linear_keys[i]))
             layers.append(activations[i])
         self.layers = layers
 
