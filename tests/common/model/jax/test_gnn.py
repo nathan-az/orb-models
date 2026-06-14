@@ -1,5 +1,6 @@
 """Compare jax Encoder / AttentionInteractionNetwork to their PyTorch refs."""
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -71,6 +72,50 @@ def test_attention_network_no_conditioning(
     )
     helpers.assert_close(jax_out[0], torch_out[0])
     helpers.assert_close(jax_out[1], torch_out[1])
+
+
+@pytest.mark.parametrize("attention_gate", ["sigmoid", "softmax"])
+def test_attention_network_input_gradients(helpers, key, graph_arrays, attention_gate):
+    """Gradients of a scalar loss w.r.t. node/edge inputs must agree.
+
+    This drives the backward pass through the whole network (attention gating,
+    segment ops, the sender/receiver gather, and both MLPs), so a wrong
+    transpose or reduction in the JAX port shows up here even when the forward
+    values happen to match.
+    """
+    rng, senders, receivers, cutoff = graph_arrays
+    torch_ain = torch_gns.AttentionInteractionNetwork(
+        LATENT, N_LAYERS, HIDDEN, attention_gate=attention_gate, activation="silu"
+    )
+    jax_ain = helpers.copy_attention_network(
+        AttentionInteractionNetwork(
+            LATENT, N_LAYERS, HIDDEN, key, attention_gate=attention_gate, activation="silu"
+        ),
+        torch_ain,
+    )
+
+    nodes = rng.standard_normal((N_NODES, LATENT))
+    edges = rng.standard_normal((N_EDGES, LATENT))
+    j_senders, j_receivers, j_cutoff = map(jnp.asarray, (senders, receivers, cutoff))
+
+    def loss_fn(n, e):
+        out_nodes, out_edges = jax_ain.forward(n, e, j_senders, j_receivers, j_cutoff)
+        return jnp.sum(out_nodes**2) + jnp.sum(out_edges**2)
+
+    jax_g_nodes, jax_g_edges = jax.grad(loss_fn, argnums=(0, 1))(
+        jnp.asarray(nodes), jnp.asarray(edges)
+    )
+
+    t_nodes = torch.tensor(nodes, requires_grad=True)
+    t_edges = torch.tensor(edges, requires_grad=True)
+    out_nodes, out_edges = torch_ain.forward(
+        t_nodes, t_edges,
+        torch.tensor(senders), torch.tensor(receivers), torch.tensor(cutoff),
+    )
+    ((out_nodes**2).sum() + (out_edges**2).sum()).backward()
+
+    helpers.assert_close(jax_g_nodes, t_nodes.grad)
+    helpers.assert_close(jax_g_edges, t_edges.grad)
 
 
 @pytest.mark.parametrize("conditioning", ["additive", "concatenative"])
