@@ -22,7 +22,7 @@ def tensor_apply(fn: Callable, x: jax.Array, dims_exclude=1, *call_args, **call_
     """Apply a function to a tensor-shaped input."""
     for _ in range(x.ndim - dims_exclude):
         fn = jax.vmap(fn)
-    return fn(*call_args, **call_kwargs)
+    return fn(x, *call_args, **call_kwargs)
 
 
 class TensorLinear(eqx.nn.Linear):
@@ -78,11 +78,13 @@ class MLP(eqx.Module):
             layers.append(activations[i])
         self.layers = layers
 
-    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, *, key: jax.Array | None = None) -> jax.Array:
         n_dropout = sum(
             isinstance(layer, eqx.nn.Dropout) for layer in self.layers
         )
         if n_dropout > 0:
+            if key is None:
+                raise ValueError("A key is required when the MLP contains dropout.")
             keys = jax.random.split(key, n_dropout)
             dropout_idx = 0
         for layer in self.layers:
@@ -122,7 +124,7 @@ class MLPAndLayerNorm(eqx.Module):
         norm_fn = get_layer_norm(norm_type)
         self.layer_norm = norm_fn(out_dim)
 
-    def __call__(self, x: jax.Array, *, key: jax.Array) -> jax.Array:
+    def __call__(self, x: jax.Array, *, key: jax.Array | None = None) -> jax.Array:
         x = self.mlp(x, key=key)
         x = self.layer_norm(x)
         return x

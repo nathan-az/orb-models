@@ -172,7 +172,7 @@ class AttentionInteractionNetwork(eqx.Module):
                 [edges, self._cond_edge_proj(cond_edges)], axis=-1
             )
 
-        if self._edge_cond == "softmax":
+        if self._attention_gate == "softmax":
             num_segments = nodes.shape[0]
             receive_attn = segment_ops.segment_softmax(
                 self._receive_attn(edges),
