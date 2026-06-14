@@ -158,7 +158,7 @@ class AttentionInteractionNetwork(eqx.Module):
         self._attention_gate = attention_gate
         self.latent_dim = latent_dim
 
-    def forward(
+    def __call__(
         self,
         nodes: jax.Array,
         edges: jax.Array,
@@ -388,7 +388,7 @@ class MoleculeGNS(eqx.Module):
             key=key_decoder,
         )
 
-    def forward(self, batch: JaxAtomGraphs):
+    def __call__(self, batch: JaxAtomGraphs):
         edge_features = self.featurize_edges(batch)
         node_features = self.featurize_nodes(batch)
         if self.conditioner is not None:

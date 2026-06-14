@@ -123,6 +123,36 @@ def copy_attention_network(jax_ain, torch_ain):
     return jax_ain
 
 
+def copy_decoder(jax_dec, torch_dec):
+    """torch Decoder wraps the mlp in `node_fn` (a Sequential[OrderedDict(mlp=...)])."""
+    return eqx.tree_at(
+        lambda m: m.mlp, jax_dec, copy_mlp(jax_dec.mlp, torch_dec.node_fn.mlp)
+    )
+
+
+def copy_molecule_gns(jax_model, torch_model):
+    """Share every weight of a torch MoleculeGNS into its jax counterpart."""
+    if jax_model.use_embedding:
+        jax_model = eqx.tree_at(
+            lambda m: m.atom_emb.embeddings.weight,
+            jax_model,
+            to_jax(torch_model.atom_emb.embeddings.weight),
+        )
+    jax_model = eqx.tree_at(
+        lambda m: m._encoder, jax_model, copy_encoder(jax_model._encoder, torch_model._encoder)
+    )
+    for i in range(len(jax_model.gnn_stacks)):
+        jax_model = eqx.tree_at(
+            lambda m, i=i: m.gnn_stacks[i],
+            jax_model,
+            copy_attention_network(jax_model.gnn_stacks[i], torch_model.gnn_stacks[i]),
+        )
+    jax_model = eqx.tree_at(
+        lambda m: m._decoder, jax_model, copy_decoder(jax_model._decoder, torch_model._decoder)
+    )
+    return jax_model
+
+
 @pytest.fixture
 def helpers():
     """Namespace of comparison + weight-copy helpers used across test modules."""
@@ -136,4 +166,6 @@ def helpers():
         copy_mlp_and_layer_norm=copy_mlp_and_layer_norm,
         copy_encoder=copy_encoder,
         copy_attention_network=copy_attention_network,
+        copy_decoder=copy_decoder,
+        copy_molecule_gns=copy_molecule_gns,
     )

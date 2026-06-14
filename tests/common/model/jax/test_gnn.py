@@ -62,11 +62,11 @@ def test_attention_network_no_conditioning(
 
     nodes = rng.standard_normal((N_NODES, LATENT))
     edges = rng.standard_normal((N_EDGES, LATENT))
-    jax_out = jax_ain.forward(
+    jax_out = jax_ain(
         jnp.asarray(nodes), jnp.asarray(edges),
         jnp.asarray(senders), jnp.asarray(receivers), jnp.asarray(cutoff),
     )
-    torch_out = torch_ain.forward(
+    torch_out = torch_ain(
         torch.tensor(nodes), torch.tensor(edges),
         torch.tensor(senders), torch.tensor(receivers), torch.tensor(cutoff),
     )
@@ -99,7 +99,7 @@ def test_attention_network_input_gradients(helpers, key, graph_arrays, attention
     j_senders, j_receivers, j_cutoff = map(jnp.asarray, (senders, receivers, cutoff))
 
     def loss_fn(n, e):
-        out_nodes, out_edges = jax_ain.forward(n, e, j_senders, j_receivers, j_cutoff)
+        out_nodes, out_edges = jax_ain(n, e, j_senders, j_receivers, j_cutoff)
         return jnp.sum(out_nodes**2) + jnp.sum(out_edges**2)
 
     jax_g_nodes, jax_g_edges = jax.grad(loss_fn, argnums=(0, 1))(
@@ -108,7 +108,7 @@ def test_attention_network_input_gradients(helpers, key, graph_arrays, attention
 
     t_nodes = torch.tensor(nodes, requires_grad=True)
     t_edges = torch.tensor(edges, requires_grad=True)
-    out_nodes, out_edges = torch_ain.forward(
+    out_nodes, out_edges = torch_ain(
         t_nodes, t_edges,
         torch.tensor(senders), torch.tensor(receivers), torch.tensor(cutoff),
     )
@@ -135,12 +135,12 @@ def test_attention_network_conditioning(helpers, key, graph_arrays, conditioning
     edges = rng.standard_normal((N_EDGES, LATENT))
     cond_nodes = rng.standard_normal((N_NODES, LATENT))
     cond_edges = rng.standard_normal((N_EDGES, LATENT))
-    jax_out = jax_ain.forward(
+    jax_out = jax_ain(
         jnp.asarray(nodes), jnp.asarray(edges),
         jnp.asarray(senders), jnp.asarray(receivers), jnp.asarray(cutoff),
         cond_nodes=jnp.asarray(cond_nodes), cond_edges=jnp.asarray(cond_edges),
     )
-    torch_out = torch_ain.forward(
+    torch_out = torch_ain(
         torch.tensor(nodes), torch.tensor(edges),
         torch.tensor(senders), torch.tensor(receivers), torch.tensor(cutoff),
         cond_nodes=torch.tensor(cond_nodes), cond_edges=torch.tensor(cond_edges),
