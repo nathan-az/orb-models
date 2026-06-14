@@ -46,7 +46,7 @@ def test_tensor_layer_norm(helpers, rng, shape):
 
 def test_mlp(helpers, key, rng):
     torch_mlp = build_mlp(4, [8, 8], 3, activation="silu")
-    jax_mlp = helpers.copy_mlp(MLP(4, [8, 8], 3, key, activation="silu"), torch_mlp)
+    jax_mlp = helpers.copy_mlp(MLP(4, [8, 8], 3, activation="silu", key=key), torch_mlp)
 
     x = rng.standard_normal((10, 4))
     helpers.assert_close(jax_mlp(jnp.asarray(x)), torch_mlp(torch.tensor(x)))
@@ -55,7 +55,7 @@ def test_mlp(helpers, key, rng):
 def test_mlp_and_layer_norm(helpers, key, rng):
     torch_mln = mlp_and_layer_norm(4, 3, 8, 2, activation="silu", mlp_norm="layer_norm")
     jax_mln = helpers.copy_mlp_and_layer_norm(
-        MLPAndLayerNorm(4, 3, 8, 2, key, activation="silu", norm_type="layer_norm"), torch_mln
+        MLPAndLayerNorm(4, 3, 8, 2, activation="silu", norm_type="layer_norm", key=key), torch_mln
     )
 
     x = rng.standard_normal((10, 4))

@@ -1,5 +1,6 @@
+from collections.abc import Callable
 import typing
-from typing import Literal
+from typing import Any, Literal
 
 import equinox as eqx
 
@@ -239,11 +240,47 @@ class Decoder(eqx.Module):
         mlp_hidden_dim: int,
         activation: str = "silu",
         *,
-        key
+        key,
     ):
         self.mlp = MLP(
             num_node_in,
             [mlp_hidden_dim] * num_mlp_layers,
             num_node_out,
             activation=activation,
+            key=key,
         )
+
+    def __call__(
+        self, x: jax.Array, *, key: jax.Array | None = None
+    ) -> jax.Array:
+        return self.mlp(x, key=key)
+
+
+class MoleculeGNS(eqx.Module):
+    encoder: Encoder
+    gnn_stacks: list[AttentionInteractionNetwork]
+    decoder: Decoder
+
+    def __init__(
+        self,
+        latent_dim: int,
+        num_message_passing_steps: int,
+        num_mlp_layers: int,
+        mlp_hidden_dim: int,
+        rbf_transform: Callable,
+        angular_transform: Callable | None = None,
+        outer_product_with_cutoff: bool = False,
+        use_embedding: bool = False,  # atom type embedding
+        expects_atom_type_embedding: bool = False,
+        interaction_params: dict[str, Any] | None = None,
+        num_node_out_features: int = 3,
+        extra_embed_dims: int | tuple[int, int] = 0,
+        node_feature_names: list[str] | None = None,
+        edge_feature_names: list[str] | None = None,
+        conditioner: Callable | None = None,
+        conditioning_type: ConditioningType = "additive",
+        checkpoint: str | None = None,
+        activation="ssp",
+        mlp_norm: str = "layer_norm",
+    ):
+        ...
