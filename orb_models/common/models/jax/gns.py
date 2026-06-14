@@ -36,18 +36,18 @@ class Encoder(eqx.Module):
             latent_dim,
             mlp_hidden_dim,
             num_mlp_layers,
-            key_nodes,
             activation=activation,
             norm_type=mlp_norm,
+            key=key_nodes,
         )
         self.edge_fn = MLPAndLayerNorm(
             num_edge_in_features,
             latent_dim,
             mlp_hidden_dim,
             num_mlp_layers,
-            key_edges,
             activation=activation,
             norm_type=mlp_norm,
+            key=key_edges,
         )
 
     def __call__(self, node_features, edge_features):
@@ -111,20 +111,20 @@ class AttentionInteractionNetwork(eqx.Module):
             latent_dim,
             mlp_hidden_dim,
             num_mlp_layers,
-            keys[0],
             activation=activation,
             norm_type=mlp_norm,
             dropout=dropout,
+            key=keys[0],
         )
         self._edge_mlp = MLPAndLayerNorm(
             latent_dim * 3 + edge_mlp_cond_dim + 2 * node_mlp_cond_dim,
             latent_dim,
             mlp_hidden_dim,
             num_mlp_layers,
-            keys[1],
             activation=activation,
             norm_type=mlp_norm,
             dropout=dropout,
+            key=keys[1],
         )
         self._receive_attn = TensorLinear(
             latent_dim + edge_mlp_cond_dim, 1, key=keys[2]
@@ -231,5 +231,19 @@ class AttentionInteractionNetwork(eqx.Module):
 class Decoder(eqx.Module):
     mlp: MLP
 
-    def __init__(self, num_node_in: int, num_node_out: int, num_mlp_layers: int, mlp_hidden_dim: int, activation: str = "silu"):
-        self.mlp = MLP(num_node_in, [mlp_hidden_dim] * num_mlp_layers, num_node_out, activation=activation)
+    def __init__(
+        self,
+        num_node_in: int,
+        num_node_out: int,
+        num_mlp_layers: int,
+        mlp_hidden_dim: int,
+        activation: str = "silu",
+        *,
+        key
+    ):
+        self.mlp = MLP(
+            num_node_in,
+            [mlp_hidden_dim] * num_mlp_layers,
+            num_node_out,
+            activation=activation,
+        )

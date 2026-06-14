@@ -53,10 +53,11 @@ class MLP(eqx.Module):
         input_size: int,
         hidden_layer_sizes: list[int],
         output_size: int,
-        key,
         activation: str = "silu",
         output_activation: str = "identity",
         dropout: float = 0.0,
+        *,
+        key
     ):
         layer_sizes = [input_size] + hidden_layer_sizes
         if output_size:
@@ -108,20 +109,21 @@ class MLPAndLayerNorm(eqx.Module):
         out_dim: int,
         hidden_dim: int,
         n_layers: int,
-        key,
         activation: str = "silu",
         output_activation: str = "identity",
         norm_type: str = "layer_norm",
         dropout: float = 0.0,
+        *,
+        key,
     ):
         self.mlp = MLP(
             in_dim,
             [hidden_dim] * n_layers,
             out_dim,
-            key,
             activation,
             output_activation,
             dropout,
+            key=key,
         )
         norm_fn = get_layer_norm(norm_type)
         self.layer_norm = norm_fn(out_dim)
