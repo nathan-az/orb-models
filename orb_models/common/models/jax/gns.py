@@ -1,5 +1,5 @@
-from collections.abc import Callable
 import typing
+from collections.abc import Callable
 from typing import Any, Literal
 
 import equinox as eqx
@@ -8,6 +8,8 @@ import jax
 import jax.numpy as jnp
 from orb_models.common.models.gns import ConditioningType
 from orb_models.common.models.jax import segment_ops
+from orb_models.common.models.jax.angular import StableNormalize
+from orb_models.common.models.jax.embedding import AtomEmbedding
 from orb_models.common.models.jax.nn_utils import (
     MLP,
     MLPAndLayerNorm,
@@ -26,10 +28,11 @@ class Encoder(eqx.Module):
         latent_dim: int,
         num_mlp_layers: int,
         mlp_hidden_dim: int,
-        key,
         checkpoint: str | None = None,
         activation: str = "silu",
         mlp_norm: str = "layer_norm",
+        *,
+        key,
     ):
         key_nodes, key_edges = jax.random.split(key, 2)
         self.node_fn = MLPAndLayerNorm(
@@ -75,7 +78,6 @@ class AttentionInteractionNetwork(eqx.Module):
         latent_dim: int,
         num_mlp_layers: int,
         mlp_hidden_dim: int,
-        key,
         attention_gate: Literal["sigmoid", "softmax"] = "sigmoid",
         conditioning: ConditioningType
         | tuple[ConditioningType, ConditioningType] = "none",
@@ -83,6 +85,8 @@ class AttentionInteractionNetwork(eqx.Module):
         activation: str = "silu",
         mlp_norm: str = "layer_norm",
         dropout: float | None = None,
+        *,
+        key,
     ):
         if isinstance(conditioning, tuple):
             self._node_cond, self._edge_cond = conditioning
@@ -92,13 +96,14 @@ class AttentionInteractionNetwork(eqx.Module):
         assert self._node_cond in typing.get_args(ConditioningType)
         assert self._edge_cond in typing.get_args(ConditioningType)
 
-        num_keys = 4
-        if self._node_cond != "none":
-            num_keys += 1
-        if self._edge_cond != "none":
-            num_keys += 1
-
-        keys = jax.random.split(key, num_keys)
+        (
+            node_key,
+            edge_key,
+            receive_attn_key,
+            send_attn_key,
+            cond_node_key,
+            cond_edge_key,
+        ) = jax.random.split(key, 6)
 
         node_mlp_cond_dim = (
             latent_dim if self._node_cond == "concatenative" else 0
@@ -115,7 +120,7 @@ class AttentionInteractionNetwork(eqx.Module):
             activation=activation,
             norm_type=mlp_norm,
             dropout=dropout,
-            key=keys[0],
+            key=node_key,
         )
         self._edge_mlp = MLPAndLayerNorm(
             latent_dim * 3 + edge_mlp_cond_dim + 2 * node_mlp_cond_dim,
@@ -125,24 +130,24 @@ class AttentionInteractionNetwork(eqx.Module):
             activation=activation,
             norm_type=mlp_norm,
             dropout=dropout,
-            key=keys[1],
+            key=edge_key,
         )
         self._receive_attn = TensorLinear(
-            latent_dim + edge_mlp_cond_dim, 1, key=keys[2]
+            latent_dim + edge_mlp_cond_dim, 1, key=receive_attn_key
         )
         self._send_attn = TensorLinear(
-            latent_dim + edge_mlp_cond_dim, 1, key=keys[3]
+            latent_dim + edge_mlp_cond_dim, 1, key=send_attn_key
         )
 
         if self._node_cond != "none":
             self._cond_node_proj = TensorLinear(
-                latent_dim, latent_dim, key=keys[4]
+                latent_dim, latent_dim, key=cond_node_key
             )
         else:
             self._cond_node_proj = None
         if self._edge_cond != "none":
             self._cond_edge_proj = TensorLinear(
-                latent_dim, latent_dim, key=keys[5]
+                latent_dim, latent_dim, key=cond_edge_key
             )
         else:
             self._cond_edge_proj = None
@@ -257,9 +262,19 @@ class Decoder(eqx.Module):
 
 
 class MoleculeGNS(eqx.Module):
-    encoder: Encoder
+    node_feature_names: list[str] = eqx.field(static=True)
+    edge_feature_names: list[str] = eqx.field(static=True)
+    num_message_passing_steps: int = eqx.field(static=True)
+    outer_product_with_cutoff: bool = eqx.field(static=True)
+    rbf_transform: eqx.Module | Callable
+    angular_transform: eqx.Module | Callable
+    embed_size: int = eqx.field(static=True)
+    use_embedding: bool = eqx.field(static=True)
+    node_embed_size: int = eqx.field(static=True)
+    conditioner: Callable | None
+    _encoder: Encoder
     gnn_stacks: list[AttentionInteractionNetwork]
-    decoder: Decoder
+    _decoder: Decoder
 
     def __init__(
         self,
@@ -271,7 +286,6 @@ class MoleculeGNS(eqx.Module):
         angular_transform: Callable | None = None,
         outer_product_with_cutoff: bool = False,
         use_embedding: bool = False,  # atom type embedding
-        expects_atom_type_embedding: bool = False,
         interaction_params: dict[str, Any] | None = None,
         num_node_out_features: int = 3,
         extra_embed_dims: int | tuple[int, int] = 0,
@@ -279,8 +293,91 @@ class MoleculeGNS(eqx.Module):
         edge_feature_names: list[str] | None = None,
         conditioner: Callable | None = None,
         conditioning_type: ConditioningType = "additive",
-        checkpoint: str | None = None,
         activation="ssp",
         mlp_norm: str = "layer_norm",
+        *,
+        key,
     ):
-        ...
+        key_embeddings, key_encoder, key_gnn_stacks, key_decoder = (
+            jax.random.split(key, 4)
+        )
+
+        self.node_feature_names = node_feature_names or []
+        self.edge_feature_names = edge_feature_names or []
+        self.num_message_passing_steps = num_message_passing_steps
+
+        # Edge embedding
+        self.outer_product_with_cutoff = outer_product_with_cutoff
+        self.rbf_transform = rbf_transform
+        if angular_transform is None:
+            angular_transform = StableNormalize()
+        self.angular_transform = angular_transform
+
+        if self.outer_product_with_cutoff:
+            self.edge_embed_size = (
+                rbf_transform.num_bases * angular_transform.dim
+            )
+        else:
+            if hasattr(rbf_transform, "num_bases"):
+                num_bases = rbf_transform.num_bases
+            else:
+                num_bases = rbf_transform.keywords["num_bases"]
+            self.edge_embed_size = num_bases + angular_transform.dim
+
+        self.use_embedding = use_embedding
+        if self.use_embedding:
+            self.node_embed_size = latent_dim
+            self.atom_emb = AtomEmbedding(self.node_embed_size, 118)
+        else:
+            self.node_embed_size = 118
+
+        if isinstance(extra_embed_dims, int):
+            extra_embed_dims = (extra_embed_dims, extra_embed_dims)
+
+        # Conditioning
+        if conditioner is not None:
+            node_conditioning = (
+                conditioning_type if conditioner.emits_node_embs else "none"
+            )  # type: ignore
+            edge_conditioning = (
+                conditioning_type if conditioner.emits_edge_embs else "none"
+            )  # type: ignore
+            self.conditioner: Callable | None = conditioner
+        else:
+            node_conditioning, edge_conditioning = "none", "none"
+            self.conditioner = None
+
+        self._encoder = Encoder(
+            num_node_in_features=self.node_embed_size + extra_embed_dims[0],
+            num_edge_in_features=self.edge_embed_size + extra_embed_dims[1],
+            latent_dim=latent_dim,
+            num_mlp_layers=num_mlp_layers,
+            mlp_hidden_dim=mlp_hidden_dim,
+            activation=activation,
+            mlp_norm=mlp_norm,
+            key=key_encoder,
+        )
+        gnn_keys = jax.random.split(
+            key_gnn_stacks, self.num_message_passing_steps
+        )
+        self.gnn_stacks = [
+            AttentionInteractionNetwork(
+                latent_dim=latent_dim,
+                num_mlp_layers=num_mlp_layers,
+                mlp_hidden_dim=mlp_hidden_dim,
+                conditioning=(node_conditioning, edge_conditioning),
+                **(interaction_params or {}),
+                activation=activation,
+                mlp_norm=mlp_norm,
+                key=gnn_keys[i],
+            )
+            for i in range(self.num_message_passing_steps)
+        ]
+        self._decoder = Decoder(
+            num_node_in=latent_dim,
+            num_node_out=num_node_out_features,
+            num_mlp_layers=num_mlp_layers,
+            mlp_hidden_dim=mlp_hidden_dim,
+            activation=activation,
+            key=key_decoder,
+        )
