@@ -72,7 +72,8 @@ class AttentionInteractionNetwork(eqx.Module):
         mlp_hidden_dim: int,
         key,
         attention_gate: Literal["sigmoid", "softmax"] = "sigmoid",
-        conditioning: ConditioningType | tuple[ConditioningType, ConditioningType] = "none",
+        conditioning: ConditioningType
+        | tuple[ConditioningType, ConditioningType] = "none",
         distance_cutoff: bool = False,
         activation: str = "ssp",
         mlp_norm: str = "layer_norm",
@@ -94,8 +95,12 @@ class AttentionInteractionNetwork(eqx.Module):
 
         keys = jax.random.split(key, num_keys)
 
-        node_mlp_cond_dim = latent_dim if self._node_cond == "concatenative" else 0
-        edge_mlp_cond_dim = latent_dim if self._edge_cond == "concatenative" else 0
+        node_mlp_cond_dim = (
+            latent_dim if self._node_cond == "concatenative" else 0
+        )
+        edge_mlp_cond_dim = (
+            latent_dim if self._edge_cond == "concatenative" else 0
+        )
 
         self._node_mlp = MLPAndLayerNorm(
             latent_dim * 3 + node_mlp_cond_dim,
@@ -117,15 +122,23 @@ class AttentionInteractionNetwork(eqx.Module):
             norm_type=mlp_norm,
             dropout=dropout,
         )
-        self._receive_attn = TensorLinear(latent_dim + edge_mlp_cond_dim, 1, key=keys[2])
-        self._send_attn = TensorLinear(latent_dim + edge_mlp_cond_dim, 1, key=keys[3])
+        self._receive_attn = TensorLinear(
+            latent_dim + edge_mlp_cond_dim, 1, key=keys[2]
+        )
+        self._send_attn = TensorLinear(
+            latent_dim + edge_mlp_cond_dim, 1, key=keys[3]
+        )
 
         if self._node_cond != "none":
-            self._cond_node_proj = TensorLinear(latent_dim, latent_dim, key=keys[4])
+            self._cond_node_proj = TensorLinear(
+                latent_dim, latent_dim, key=keys[4]
+            )
         else:
             self._cond_node_proj = None
         if self._edge_cond != "none":
-            self._cond_edge_proj = TensorLinear(latent_dim, latent_dim, key=keys[5])
+            self._cond_edge_proj = TensorLinear(
+                latent_dim, latent_dim, key=keys[5]
+            )
         else:
             self._cond_edge_proj = None
 
@@ -147,13 +160,17 @@ class AttentionInteractionNetwork(eqx.Module):
             if cond_nodes is not None:
                 nodes = nodes + self._cond_node_proj(cond_nodes)
         elif self._node_cond == "concatenative" and cond_nodes is not None:
-            nodes = jnp.concatenate([nodes, self._cond_node_proj(cond_nodes)], axis=-1)
+            nodes = jnp.concatenate(
+                [nodes, self._cond_node_proj(cond_nodes)], axis=-1
+            )
 
         if self._edge_cond == "additive":
             if cond_edges is not None:
                 edges = edges + self._cond_edge_proj(cond_edges)
         elif self._edge_cond == "concatenative" and cond_edges is not None:
-            edges = jnp.concatenate([edges, self._cond_edge_proj(cond_edges)], axis=-1)
+            edges = jnp.concatenate(
+                [edges, self._cond_edge_proj(cond_edges)], axis=-1
+            )
 
         if self._edge_cond == "softmax":
             num_segments = nodes.shape[0]
@@ -179,7 +196,9 @@ class AttentionInteractionNetwork(eqx.Module):
 
         sent_attributes = nodes[senders]
         received_attributes = nodes[receivers]
-        edge_features = jnp.concatenate([edges, sent_attributes, received_attributes], axis=-1)
+        edge_features = jnp.concatenate(
+            [edges, sent_attributes, received_attributes], axis=-1
+        )
         updated_edges = self._edge_mlp(edge_features)
 
         sent_attributes = jax.ops.segment_sum(
@@ -189,7 +208,9 @@ class AttentionInteractionNetwork(eqx.Module):
             updated_edges * receive_attn, receivers, nodes.shape[0]
         )
 
-        node_features = jnp.concatenate([nodes, received_attributes, sent_attributes], axis=-1)
+        node_features = jnp.concatenate(
+            [nodes, received_attributes, sent_attributes], axis=-1
+        )
         updated_nodes = self._node_mlp(node_features)
 
         if self._node_cond == "concatenative":
@@ -201,4 +222,3 @@ class AttentionInteractionNetwork(eqx.Module):
         edges = edges + updated_edges
 
         return nodes, edges
-        
