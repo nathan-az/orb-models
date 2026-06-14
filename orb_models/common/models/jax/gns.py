@@ -7,7 +7,11 @@ import jax
 import jax.numpy as jnp
 from orb_models.common.models.gns import ConditioningType
 from orb_models.common.models.jax import segment_ops
-from orb_models.common.models.jax.nn_utils import MLPAndLayerNorm, TensorLinear
+from orb_models.common.models.jax.nn_utils import (
+    MLP,
+    MLPAndLayerNorm,
+    TensorLinear,
+)
 
 
 class Encoder(eqx.Module):
@@ -75,7 +79,7 @@ class AttentionInteractionNetwork(eqx.Module):
         conditioning: ConditioningType
         | tuple[ConditioningType, ConditioningType] = "none",
         distance_cutoff: bool = False,
-        activation: str = "ssp",
+        activation: str = "silu",
         mlp_norm: str = "layer_norm",
         dropout: float | None = None,
     ):
@@ -222,3 +226,10 @@ class AttentionInteractionNetwork(eqx.Module):
         edges = edges + updated_edges
 
         return nodes, edges
+
+
+class Decoder(eqx.Module):
+    mlp: MLP
+
+    def __init__(self, num_node_in: int, num_node_out: int, num_mlp_layers: int, mlp_hidden_dim: int, activation: str = "silu"):
+        self.mlp = MLP(num_node_in, [mlp_hidden_dim] * num_mlp_layers, num_node_out, activation=activation)

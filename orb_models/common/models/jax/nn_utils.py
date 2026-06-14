@@ -44,6 +44,8 @@ def get_layer_norm(norm_type: str):
 
 
 class MLP(eqx.Module):
+    """In hindsight this is very similar to eqx.nn.MLP. Key difference is this
+    incorporates dropout. Might be able to deprecate in future"""
     layers: list[eqx.Module]
 
     def __init__(
