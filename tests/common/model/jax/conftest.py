@@ -12,6 +12,10 @@ import jax
 # Must be enabled before any array is created. Conftest is imported first, so
 # this is in effect for every test module in this package.
 jax.config.update("jax_enable_x64", True)
+# Tiny fp64 equivalence tests: the GPU gives nothing here and JAX's default 75%
+# VRAM preallocation collides with torch's CUDA context in-process (OOM). Pin CPU.
+# (Test-only — does NOT affect real jobs, which import jax without this conftest.)
+jax.config.update("jax_platform_name", "cpu")
 
 import equinox as eqx
 import jax.numpy as jnp
