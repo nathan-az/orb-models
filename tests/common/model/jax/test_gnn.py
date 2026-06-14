@@ -31,7 +31,7 @@ def test_encoder(helpers, key):
     n_node_in, n_edge_in = 7, 5
     torch_enc = torch_gns.Encoder(n_node_in, n_edge_in, LATENT, N_LAYERS, HIDDEN, activation="silu")
     jax_enc = helpers.copy_encoder(
-        Encoder(n_node_in, n_edge_in, LATENT, N_LAYERS, HIDDEN, key, activation="silu"), torch_enc
+        Encoder(n_node_in, n_edge_in, LATENT, N_LAYERS, HIDDEN, activation="silu", key=key), torch_enc
     )
 
     node_feats = rng.standard_normal((N_NODES, n_node_in))
@@ -54,7 +54,7 @@ def test_attention_network_no_conditioning(
     )
     jax_ain = helpers.copy_attention_network(
         AttentionInteractionNetwork(
-            LATENT, N_LAYERS, HIDDEN, key,
+            LATENT, N_LAYERS, HIDDEN, key=key,
             attention_gate=attention_gate, distance_cutoff=distance_cutoff, activation="silu",
         ),
         torch_ain,
@@ -89,7 +89,7 @@ def test_attention_network_input_gradients(helpers, key, graph_arrays, attention
     )
     jax_ain = helpers.copy_attention_network(
         AttentionInteractionNetwork(
-            LATENT, N_LAYERS, HIDDEN, key, attention_gate=attention_gate, activation="silu"
+            LATENT, N_LAYERS, HIDDEN, attention_gate=attention_gate, activation="silu", key=key
         ),
         torch_ain,
     )
@@ -126,7 +126,7 @@ def test_attention_network_conditioning(helpers, key, graph_arrays, conditioning
     )
     jax_ain = helpers.copy_attention_network(
         AttentionInteractionNetwork(
-            LATENT, N_LAYERS, HIDDEN, key, conditioning=conditioning, activation="silu"
+            LATENT, N_LAYERS, HIDDEN, conditioning=conditioning, activation="silu", key=key
         ),
         torch_ain,
     )
