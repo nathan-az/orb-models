@@ -3,6 +3,7 @@ from collections.abc import Callable
 import equinox as eqx
 
 import jax
+import jax.numpy as jnp
 
 
 def get_activation(activation: str):
@@ -18,7 +19,9 @@ def get_activation(activation: str):
     return act_fn
 
 
-def tensor_apply(fn: Callable, x: jax.Array, dims_exclude=1, *call_args, **call_kwargs) -> jax.Array:
+def tensor_apply(
+    fn: Callable, x: jax.Array, dims_exclude=1, *call_args, **call_kwargs
+) -> jax.Array:
     """Apply a function to a tensor-shaped input."""
     for _ in range(x.ndim - dims_exclude):
         fn = jax.vmap(fn)
@@ -46,6 +49,7 @@ def get_layer_norm(norm_type: str):
 class MLP(eqx.Module):
     """In hindsight this is very similar to eqx.nn.MLP. Key difference is this
     incorporates dropout. Might be able to deprecate in future"""
+
     layers: list[eqx.Module]
 
     def __init__(
@@ -57,7 +61,7 @@ class MLP(eqx.Module):
         output_activation: str = "identity",
         dropout: float = 0.0,
         *,
-        key
+        key,
     ):
         layer_sizes = [input_size] + hidden_layer_sizes
         if output_size:
@@ -81,13 +85,17 @@ class MLP(eqx.Module):
             layers.append(activations[i])
         self.layers = layers
 
-    def __call__(self, x: jax.Array, *, key: jax.Array | None = None) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, *, key: jax.Array | None = None
+    ) -> jax.Array:
         n_dropout = sum(
             isinstance(layer, eqx.nn.Dropout) for layer in self.layers
         )
         if n_dropout > 0:
             if key is None:
-                raise ValueError("A key is required when the MLP contains dropout.")
+                raise ValueError(
+                    "A key is required when the MLP contains dropout."
+                )
             keys = jax.random.split(key, n_dropout)
             dropout_idx = 0
         for layer in self.layers:
@@ -128,7 +136,22 @@ class MLPAndLayerNorm(eqx.Module):
         norm_fn = get_layer_norm(norm_type)
         self.layer_norm = norm_fn(out_dim)
 
-    def __call__(self, x: jax.Array, *, key: jax.Array | None = None) -> jax.Array:
+    def __call__(
+        self, x: jax.Array, *, key: jax.Array | None = None
+    ) -> jax.Array:
         x = self.mlp(x, key=key)
         x = self.layer_norm(x)
         return x
+
+
+def get_cutoff(r: jax.Array, r_max: float = 6.0) -> jax.Array:
+    """Get a hardcoded cutoff function for attention. Default cutoff is 6 angstrom."""
+    p = 4  # polynomial order
+    envelope: jax.Array = (
+        1.0
+        - ((p + 1.0) * (p + 2.0) / 2.0) * jnp.pow(r / r_max, p)
+        + p * (p + 2.0) * jnp.pow(r / r_max, p + 1)
+        - (p * (p + 1.0) / 2) * jnp.pow(r / r_max, p + 2)
+    )
+    cutoff = jnp.expand_dims(envelope * (r < r_max), axis=-1)
+    return cutoff

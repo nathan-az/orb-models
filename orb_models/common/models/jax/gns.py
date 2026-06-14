@@ -6,6 +6,7 @@ import equinox as eqx
 
 import jax
 import jax.numpy as jnp
+from orb_models.common.atoms.jax.graph_batch import JaxAtomGraphs
 from orb_models.common.models.gns import ConditioningType
 from orb_models.common.models.jax import segment_ops
 from orb_models.common.models.jax.angular import StableNormalize
@@ -14,6 +15,7 @@ from orb_models.common.models.jax.nn_utils import (
     MLP,
     MLPAndLayerNorm,
     TensorLinear,
+    get_cutoff,
 )
 
 
@@ -384,4 +386,67 @@ class MoleculeGNS(eqx.Module):
             mlp_hidden_dim=mlp_hidden_dim,
             activation=activation,
             key=key_decoder,
+        )
+
+    def forward(self, batch: JaxAtomGraphs):
+        edge_features = self.featurize_edges(batch)
+        node_features = self.featurize_nodes(batch)
+        if self.conditioner is not None:
+            cond_nodes, cond_edges = self.conditioner(batch)
+        else:
+            cond_nodes, cond_edges = None, None
+
+        nodes, edges = self._encoder(node_features, edge_features)
+
+        cutoff = get_cutoff(
+            jnp.linalg.norm(batch.edge_features["vectors"], axis=-1)
+        )
+        for gnn in self.gnn_stacks:
+            nodes, edges = gnn(
+                nodes,
+                edges,
+                batch.senders,
+                batch.receivers,
+                cutoff,
+                cond_nodes=cond_nodes,
+                cond_edges=cond_edges,
+            )
+        pred = self._decoder(nodes)
+        return {"node_features": nodes, "edge_features": edges, "pred": pred}
+
+    def featurize_nodes(self, batch: JaxAtomGraphs):
+        if self.use_embedding:
+            atomic_embedding = self.atom_emb(batch)
+        else:
+            atomic_embedding = batch.node_features["atomic_numbers_embedding"]
+
+        feature_names = [k for k in self.node_feature_names if k != "feat"]
+        return jnp.concatenate(
+            [
+                atomic_embedding,
+                *[batch.node_features[k] for k in feature_names],
+            ],
+            axis=-1,
+        )
+
+    def featurize_edges(self, batch: JaxAtomGraphs):
+        vectors = batch.edge_features["vectors"]
+        lengths = jnp.linalg.norm(vectors, axis=-1)
+
+        angular_embedding = self.angular_transform(vectors)
+        rbfs = self.rbf_transform(lengths)
+
+        if self.outer_product_with_cutoff:
+            cutoff = get_cutoff(lengths)
+            outer_product = rbfs[:, :, None] * angular_embedding[:, None, :]
+            edge_features = cutoff * outer_product.reshape(
+                vectors.shape[0], self.edge_embed_size
+            )
+        else:
+            edge_features = jnp.concatenate([rbfs, angular_embedding], axis=-1)
+
+        feature_names = [k for k in self.edge_feature_names if k != "feat"]
+        return jnp.concatenate(
+            [edge_features, *[batch.edge_features[k] for k in feature_names]],
+            axis=-1,
         )
