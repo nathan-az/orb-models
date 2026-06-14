@@ -1,39 +1,52 @@
 import equinox as eqx
 
 import jax
-from orb_models.common.atoms.batch.graph_batch import AtomGraphs
+import jax.numpy as jnp
+from orb_models.common.atoms.jax.graph_batch import JaxAtomGraphs
 from orb_models.common.models.jax.nn_utils import tensor_apply
 
 
 class AtomEmbedding(eqx.Module):
+    """Initial atom embeddings based on atom type.
+
+    The embedding *table* is float (``dtype``); the *indices* (atomic numbers)
+    must be integers, mirroring the torch ref's ``.long()`` on the lookup.
+    """
+
     embed_size: int = eqx.field(static=True)
     embeddings: eqx.nn.Embedding
 
-    def __init__(self, emb_size, num_elements, *, key: jax.Array | None):
-        super().__init__()
-        self.emb_size = emb_size
-        self.embeddings = eqx.nn.Embedding(num_elements + 1, emb_size)
-        # init by uniform distribution
-        if key:
-            # if no key is passed, assume we have weights already (pretrained)
-            jax.nn.initializers.uniform(scale=2*(3**0.5))(self.embeddings.weight, key=key)
-            self.embeddings.weight -= 3**0.5
+    def __init__(
+        self,
+        emb_size: int,
+        num_elements: int,
+        *,
+        key: jax.Array | None,
+    ):
+        self.embed_size = emb_size
+        # No explicit dtype: jax.random.uniform / jnp.zeros follow the default
+        # floating dtype (float32, or float64 under jax_enable_x64), matching
+        # eqx.nn.Linear/LayerNorm so the embedding never mismatches the encoder.
+        shape = (num_elements + 1, emb_size)
+        if key is not None:
+            # init by uniform distribution, matching torch nn.init.uniform_(-sqrt(3), sqrt(3))
+            weight = jax.random.uniform(
+                key, shape, minval=-(3**0.5), maxval=3**0.5
+            )
+        else:
+            # no key -> assume weights are loaded afterwards (e.g. pretrained); a
+            # valid eqx.nn.Embedding still needs a concrete table, so use zeros.
+            weight = jnp.zeros(shape)
+        self.embeddings = eqx.nn.Embedding(weight=weight)
 
     @property
     def out_dim(self):
         """Size of the embedding."""
-        return self.emb_size
+        return self.embed_size
 
-    def __call__(self, batch: AtomGraphs):
-        """
-        Forward pass of the atom embedding layer.
-
-        Returns
-        -------
-        h: torch.Tensor, shape=(nAtoms, emb_size)
-            Atom embeddings.
-        """
-        # NOTE: We can't use getters or setters here because torch.compile can't handle them.
-        atomic_number_rep = batch.node_features["atomic_numbers"]
-        h = tensor_apply(self.embeddings, atomic_number_rep, dims_exclude=0)
-        return h
+    def __call__(self, batch: JaxAtomGraphs) -> jax.Array:
+        """Atom embeddings, shape (nAtoms, emb_size)."""
+        # eqx.nn.Embedding takes a scalar index, so map over the atom axis.
+        # Cast to int for the gather (the torch ref does this with .long()).
+        atomic_number_rep = batch.node_features["atomic_numbers"].astype(jnp.int32)
+        return tensor_apply(self.embeddings, atomic_number_rep, dims_exclude=0)

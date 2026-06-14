@@ -268,9 +268,10 @@ class MoleculeGNS(eqx.Module):
     outer_product_with_cutoff: bool = eqx.field(static=True)
     rbf_transform: eqx.Module | Callable
     angular_transform: eqx.Module | Callable
-    embed_size: int = eqx.field(static=True)
+    edge_embed_size: int = eqx.field(static=True)
     use_embedding: bool = eqx.field(static=True)
     node_embed_size: int = eqx.field(static=True)
+    atom_emb: AtomEmbedding | None
     conditioner: Callable | None
     _encoder: Encoder
     gnn_stacks: list[AttentionInteractionNetwork]
@@ -327,9 +328,12 @@ class MoleculeGNS(eqx.Module):
         self.use_embedding = use_embedding
         if self.use_embedding:
             self.node_embed_size = latent_dim
-            self.atom_emb = AtomEmbedding(self.node_embed_size, 118)
+            self.atom_emb = AtomEmbedding(
+                self.node_embed_size, 118, key=key_embeddings
+            )
         else:
             self.node_embed_size = 118
+            self.atom_emb = None
 
         if isinstance(extra_embed_dims, int):
             extra_embed_dims = (extra_embed_dims, extra_embed_dims)
