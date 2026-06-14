@@ -14,7 +14,11 @@ from orb_models.common.atoms.batch.graph_batch import AtomGraphs
 from orb_models.common.models import base, segment_ops
 from orb_models.common.models.angular import UnitVector
 from orb_models.common.models.embedding import AtomEmbedding, AtomEmbeddingBag
-from orb_models.common.models.nn_util import build_mlp, get_cutoff, mlp_and_layer_norm
+from orb_models.common.models.nn_util import (
+    build_mlp,
+    get_cutoff,
+    mlp_and_layer_norm,
+)
 
 ConditioningType = Literal["additive", "concatenative", "none"]
 
@@ -101,7 +105,8 @@ class AttentionInteractionNetwork(nn.Module):
         num_mlp_layers: int,
         mlp_hidden_dim: int,
         attention_gate: Literal["sigmoid", "softmax"] = "sigmoid",
-        conditioning: ConditioningType | tuple[ConditioningType, ConditioningType] = "none",
+        conditioning: ConditioningType
+        | tuple[ConditioningType, ConditioningType] = "none",
         distance_cutoff: bool = False,
         checkpoint: str | None = None,
         activation: str = "ssp",
@@ -139,8 +144,12 @@ class AttentionInteractionNetwork(nn.Module):
         assert self._edge_cond in typing.get_args(ConditioningType)
 
         # Get the dimension of the conditioning features for the MLPs
-        node_mlp_cond_dim = latent_dim if self._node_cond == "concatenative" else 0
-        edge_mlp_cond_dim = latent_dim if self._edge_cond == "concatenative" else 0
+        node_mlp_cond_dim = (
+            latent_dim if self._node_cond == "concatenative" else 0
+        )
+        edge_mlp_cond_dim = (
+            latent_dim if self._edge_cond == "concatenative" else 0
+        )
 
         self._node_mlp = mlp_and_layer_norm(
             latent_dim * 3 + node_mlp_cond_dim,
@@ -242,7 +251,9 @@ class AttentionInteractionNetwork(nn.Module):
 
         sent_attributes = nodes[senders]
         received_attributes = nodes[receivers]
-        edge_features = torch.cat([edges, sent_attributes, received_attributes], dim=1)
+        edge_features = torch.cat(
+            [edges, sent_attributes, received_attributes], dim=1
+        )
         updated_edges = self._edge_mlp(edge_features)
 
         sent_attributes = segment_ops.segment_sum(
@@ -252,7 +263,9 @@ class AttentionInteractionNetwork(nn.Module):
             updated_edges * receive_attn, receivers, nodes.shape[0]
         )
 
-        node_features = torch.cat([nodes, received_attributes, sent_attributes], dim=1)
+        node_features = torch.cat(
+            [nodes, received_attributes, sent_attributes], dim=1
+        )
         updated_nodes = self._node_mlp(node_features)
 
         # Remove the conditioning features, if using concatenation
@@ -390,7 +403,9 @@ class MoleculeGNS(base.ModelMixin):
         """
         super().__init__()
 
-        kwargs = {k: v for k, v in kwargs.items() if k not in self._deprecated_args}
+        kwargs = {
+            k: v for k, v in kwargs.items() if k not in self._deprecated_args
+        }
         if kwargs:
             raise ValueError(
                 f"The following kwargs are not arguments to MoleculeGNS: {kwargs.keys()}"
@@ -407,7 +422,9 @@ class MoleculeGNS(base.ModelMixin):
             angular_transform = UnitVector()
         self.angular_transform = angular_transform
         if self.outer_product_with_cutoff:
-            self.edge_embed_size = rbf_transform.num_bases * angular_transform.dim  # type: ignore
+            self.edge_embed_size = (
+                rbf_transform.num_bases * angular_transform.dim
+            )  # type: ignore
         else:
             if hasattr(rbf_transform, "num_bases"):
                 num_bases = rbf_transform.num_bases
@@ -431,8 +448,12 @@ class MoleculeGNS(base.ModelMixin):
 
         # Conditioning
         if conditioner is not None:
-            node_conditioning = conditioning_type if conditioner.emits_node_embs else "none"  # type: ignore
-            edge_conditioning = conditioning_type if conditioner.emits_edge_embs else "none"  # type: ignore
+            node_conditioning = (
+                conditioning_type if conditioner.emits_node_embs else "none"
+            )  # type: ignore
+            edge_conditioning = (
+                conditioning_type if conditioner.emits_edge_embs else "none"
+            )  # type: ignore
             self.conditioner: Callable | None = conditioner
         else:
             node_conditioning, edge_conditioning = "none", "none"
@@ -525,7 +546,11 @@ class MoleculeGNS(base.ModelMixin):
         # Exclusion of 'feat' is for backward compatibility with old code
         feature_names = [k for k in self.node_feature_names if k != "feat"]
         return torch.cat(
-            [atomic_embedding, *[batch.node_features[k] for k in feature_names]], dim=-1
+            [
+                atomic_embedding,
+                *[batch.node_features[k] for k in feature_names],
+            ],
+            dim=-1,
         )
 
     def featurize_edges(self, batch: AtomGraphs) -> torch.Tensor:
@@ -541,17 +566,24 @@ class MoleculeGNS(base.ModelMixin):
             # (nedges, x, y)
             outer_product = rbfs[:, :, None] * angular_embedding[:, None, :]
             # (nedges, x * y)
-            edge_features = cutoff * outer_product.view(vectors.shape[0], self.edge_embed_size)
+            edge_features = cutoff * outer_product.view(
+                vectors.shape[0], self.edge_embed_size
+            )
         else:
             edge_features = torch.cat([rbfs, angular_embedding], dim=1)
 
         # For backwards compatibility, exclude 'feat'
         feature_names = [k for k in self.edge_feature_names if k != "feat"]
-        return torch.cat([edge_features, *[batch.edge_features[k] for k in feature_names]], dim=-1)
+        return torch.cat(
+            [edge_features, *[batch.edge_features[k] for k in feature_names]],
+            dim=-1,
+        )
 
     def loss(self, batch: AbstractAtomBatch) -> base.ModelOutput:
         """Loss function for molecular GNS. NOTE: this is rarely used directly."""
-        assert isinstance(batch, AtomGraphs), f"Expected AtomGraphs, got {type(batch)}"
+        assert isinstance(batch, AtomGraphs), (
+            f"Expected AtomGraphs, got {type(batch)}"
+        )
         out = self(batch)
         if batch.node_targets is not None:
             assert "noise_target" in batch.node_targets

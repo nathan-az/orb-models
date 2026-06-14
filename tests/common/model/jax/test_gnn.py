@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from orb_models.common.models import gns as torch_gns
-from orb_models.common.models.jax.gnn import (
+from orb_models.common.models.jax.gns import (
     AttentionInteractionNetwork,
     Encoder,
 )
