@@ -18,21 +18,21 @@ def get_activation(activation: str):
     return act_fn
 
 
-def tensor_apply(fn: Callable, x: jax.Array, dims_exclude=1) -> jax.Array:
+def tensor_apply(fn: Callable, x: jax.Array, dims_exclude=1, *call_args, **call_kwargs) -> jax.Array:
     """Apply a function to a tensor-shaped input."""
     for _ in range(x.ndim - dims_exclude):
         fn = jax.vmap(fn)
-    return fn
+    return fn(*call_args, **call_kwargs)
 
 
 class TensorLinear(eqx.nn.Linear):
     def __call__(self, x: jax.Array) -> jax.Array:
-        return tensor_apply(super().__call__, x)(x)
+        return tensor_apply(super().__call__, x)
 
 
 class TensorLayerNorm(eqx.nn.LayerNorm):
     def __call__(self, x: jax.Array) -> jax.Array:
-        return tensor_apply(super().__call__, x, len(self.shape))(x)
+        return tensor_apply(super().__call__, x, len(self.shape))
 
 
 def get_layer_norm(norm_type: str):
