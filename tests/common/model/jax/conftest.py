@@ -176,6 +176,23 @@ def copy_energy_head(jax_head, torch_head):
     return jax_head
 
 
+def copy_conservative_regressor(jax_model, torch_model):
+    """Share a whole ConservativeRegressor: backbone + energy head.
+
+    ZBL pair repulsion has no trainable weights (fixed physical constants), so it
+    needs no copying.
+    """
+    jax_model = eqx.tree_at(
+        lambda m: m.gns, jax_model, copy_molecule_gns(jax_model.gns, torch_model.model)
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.energy_head,
+        jax_model,
+        copy_energy_head(jax_model.energy_head, torch_model.heads["energy"]),
+    )
+    return jax_model
+
+
 @pytest.fixture
 def helpers():
     """Namespace of comparison + weight-copy helpers used across test modules."""
@@ -192,4 +209,5 @@ def helpers():
         copy_decoder=copy_decoder,
         copy_molecule_gns=copy_molecule_gns,
         copy_energy_head=copy_energy_head,
+        copy_conservative_regressor=copy_conservative_regressor,
     )
