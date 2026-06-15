@@ -176,8 +176,17 @@ def copy_energy_head(jax_head, torch_head):
     return jax_head
 
 
+def copy_scalar_normalizer(jax_norm, torch_norm):
+    """Share a ScalarNormalizer's fixed mean/std buffers."""
+    jax_norm = eqx.tree_at(lambda m: m.mean, jax_norm, to_jax(torch_norm.bn.running_mean))
+    jax_norm = eqx.tree_at(
+        lambda m: m.std, jax_norm, to_jax(torch.sqrt(torch_norm.bn.running_var))
+    )
+    return jax_norm
+
+
 def copy_conservative_regressor(jax_model, torch_model):
-    """Share a whole ConservativeRegressor: backbone + energy head.
+    """Share a whole ConservativeRegressor: backbone + energy head + normalizers.
 
     ZBL pair repulsion has no trainable weights (fixed physical constants), so it
     needs no copying.
@@ -189,6 +198,16 @@ def copy_conservative_regressor(jax_model, torch_model):
         lambda m: m.energy_head,
         jax_model,
         copy_energy_head(jax_model.energy_head, torch_model.heads["energy"]),
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.grad_forces_normalizer,
+        jax_model,
+        copy_scalar_normalizer(jax_model.grad_forces_normalizer, torch_model.grad_forces_normalizer),
+    )
+    jax_model = eqx.tree_at(
+        lambda m: m.grad_stress_normalizer,
+        jax_model,
+        copy_scalar_normalizer(jax_model.grad_stress_normalizer, torch_model.grad_stress_normalizer),
     )
     return jax_model
 
@@ -209,5 +228,6 @@ def helpers():
         copy_decoder=copy_decoder,
         copy_molecule_gns=copy_molecule_gns,
         copy_energy_head=copy_energy_head,
+        copy_scalar_normalizer=copy_scalar_normalizer,
         copy_conservative_regressor=copy_conservative_regressor,
     )

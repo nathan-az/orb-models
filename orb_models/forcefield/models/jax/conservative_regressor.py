@@ -40,6 +40,13 @@ from orb_models.common.atoms.jax.graph_batch import (
     compute_differentiable_edge_vectors,
 )
 from orb_models.common.models.jax.gns import MoleculeGNS
+from orb_models.forcefield.models.jax.forcefield_heads import ScalarNormalizer
+from orb_models.forcefield.models.jax.loss import (
+    forces_loss,
+    full_3x3_to_voigt_6,
+    mean_error,
+    stress_loss,
+)
 
 
 class ConservativeRegressor(eqx.Module):
@@ -55,6 +62,15 @@ class ConservativeRegressor(eqx.Module):
     gns: MoleculeGNS
     energy_head: eqx.Module
     pair_repulsion: eqx.Module | None = None
+    # Force/stress target normalizers (torch grad_forces/grad_stress_normalizer).
+    # Fixed buffers, not params -- default to identity until copied/fit.
+    grad_forces_normalizer: ScalarNormalizer = eqx.field(
+        default_factory=lambda: ScalarNormalizer(mean=jnp.zeros(1), std=jnp.ones(1))
+    )
+    grad_stress_normalizer: ScalarNormalizer = eqx.field(
+        default_factory=lambda: ScalarNormalizer(mean=jnp.zeros(1), std=jnp.ones(1))
+    )
+    forces_loss_type: str = eqx.field(static=True, default="condhuber_0.01")
 
 
 class Predictions(eqx.Module):
@@ -156,14 +172,6 @@ def predict(
     )
 
 
-def _huber(pred: jax.Array, target: jax.Array, delta: float = 0.01) -> jax.Array:
-    err = pred - target
-    abs_err = jnp.abs(err)
-    quad = jnp.minimum(abs_err, delta)
-    lin = abs_err - quad
-    return jnp.mean(0.5 * quad**2 + delta * lin)
-
-
 def _total_loss(
     energy: jax.Array,
     dE_dpos: jax.Array,
@@ -172,34 +180,50 @@ def _total_loss(
     graph: JaxAtomGraphs,
     targets: dict[str, jax.Array],
     weights: dict[str, float],
+    model: ConservativeRegressor,
     has_stress: bool,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
     """Scalar training loss as a function of the *raw* energy + derivatives.
 
     Written in terms of (energy, dE_dpos, dE_ddisp, dE_dgen) on purpose: running
     `jax.grad` over this w.r.t. those four args yields the cotangents for the jvp
-    path with the sign (forces = -dE_dpos), the 1/volume (stress = dE_ddisp/V),
-    the per-term 1/n from each `mean`, and the loss weights all folded in -- for
-    whatever loss `_huber` is swapped for. Returns the per-term breakdown as aux
-    (handy for logging, and free since we computed it anyway).
+    path with the sign (forces = -dE_dpos), the 1/volume (stress = dE_ddisp/V), the
+    normalizer 1/std, the condhuber clip, and the loss weights all folded in. `model`
+    supplies the (fixed-buffer) energy head + force/stress normalizers; it is an
+    extra arg, NOT differentiated by the cotangent `jax.grad(argnums=(0,1,2,3))`.
+
+    Targets: `energy` (G,) absolute, `forces` (N,3), `stress` (G,6) Voigt.
     """
-    forces = -dE_dpos
-    energy_loss = weights["energy"] * _huber(energy, targets["energy"])
-    forces_loss = weights["forces"] * _huber(forces, targets["forces"])
-    total = energy_loss + forces_loss
-    breakdown = {"energy": energy_loss, "forces": forces_loss}
+    head = model.energy_head
+
+    # Energy: huber on reference-subtracted, normalized interaction energy.
+    reference = head.reference(
+        graph.node_features["atomic_numbers"], graph.per_node_graph_index, graph.n_node.shape[0]
+    )
+    interaction_target = targets["energy"] - reference
+    e_pred = head.normalize_for_loss(energy, graph)
+    e_target = head.normalize_for_loss(interaction_target, graph)
+    energy_l = weights["energy"] * mean_error(e_pred, e_target, head.loss_type)
+
+    # Forces = -dE/dpos: normalize then condhuber.
+    forces_l = weights["forces"] * forces_loss(
+        -dE_dpos, targets["forces"], model.grad_forces_normalizer, model.forces_loss_type
+    )
+
+    total = energy_l + forces_l
+    breakdown = {"energy": energy_l, "forces": forces_l}
 
     if has_stress:
         volume = jnp.abs(jnp.linalg.det(graph.system_features["cell"]))  # (G,)
-        stress = dE_ddisp / volume[:, None, None]
-        stress_loss = weights["stress"] * _huber(stress, targets["stress"])
-        total = total + stress_loss
-        breakdown["stress"] = stress_loss
+        stress = full_3x3_to_voigt_6(dE_ddisp / volume[:, None, None])  # (G,6)
+        stress_l = weights["stress"] * stress_loss(
+            stress, targets["stress"], model.grad_stress_normalizer, head.loss_type
+        )
+        total = total + stress_l
+        breakdown["stress"] = stress_l
 
-    # An equigrad / rotational_grad regulariser would consume `dE_dgen` here, e.g.
-    #   reg = weights["rotational_grad"] * jnp.mean(jnp.linalg.norm(dE_dgen, axis=(1, 2)))
-    # As long as it is absent, jax.grad gives a zero `dE_dgen` cotangent and the
-    # generator tangent below is a no-op.
+    # An equigrad / rotational_grad regulariser would consume `dE_dgen` here; absent,
+    # jax.grad gives a zero `dE_dgen` cotangent and the generator tangent is a no-op.
     breakdown["total"] = total
     return total, breakdown
 
@@ -215,7 +239,7 @@ def total_loss(
     """`_total_loss` composed with the energy/grad forward pass."""
     energy, dE_dpos, dE_ddisp, dE_dgen = _energy_and_grads(graph, model)
     return _total_loss(
-        energy, dE_dpos, dE_ddisp, dE_dgen, graph, targets, weights, has_stress
+        energy, dE_dpos, dE_ddisp, dE_dgen, graph, targets, weights, model, has_stress
     )
 
 
@@ -269,7 +293,7 @@ def compute_grads_jvp(
     frozen = jax.tree.map(jax.lax.stop_gradient, (energy, dE_dpos, dE_ddisp, dE_dgen))
     (c_energy, c_pos, c_disp, c_gen), breakdown = jax.grad(
         _total_loss, argnums=(0, 1, 2, 3), has_aux=True
-    )(*frozen, graph, targets, weights, has_stress)
+    )(*frozen, graph, targets, weights, model, has_stress)
 
     # 3. Single forward-mode pass. primal = per-graph energy (-> energy term),
     #    tangent (G,) = per-graph directional derivative; summing it gives

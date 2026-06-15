@@ -81,6 +81,7 @@ class EnergyHead(eqx.Module):
     normalizer: ScalarNormalizer
     reference: LinearReferenceEnergy
     atom_avg: bool = eqx.field(static=True)
+    loss_type: str = eqx.field(static=True)
 
     def __init__(
         self,
@@ -91,6 +92,7 @@ class EnergyHead(eqx.Module):
         key,
         predict_atom_avg: bool = True,
         activation: str = "silu",
+        loss_type: str = "huber_0.01",
     ):
         self.mlp = MLP(
             input_size=latent_dim,
@@ -104,6 +106,7 @@ class EnergyHead(eqx.Module):
         self.normalizer = ScalarNormalizer(mean=jnp.zeros(1), std=jnp.ones(1))
         self.reference = LinearReferenceEnergy(coefficients=jnp.zeros(118))
         self.atom_avg = predict_atom_avg
+        self.loss_type = loss_type
 
     def __call__(self, node_features: jax.Array, graph) -> jax.Array:
         """Interaction energy (G,) -- the quantity forces/stress differentiate."""
@@ -116,6 +119,16 @@ class EnergyHead(eqx.Module):
         if self.atom_avg:
             energy = energy * graph.n_node
         return energy
+
+    def normalize_for_loss(self, x: jax.Array, graph) -> jax.Array:
+        """torch EnergyHead._normalize: per-atom-average (if atom_avg) then normalize.
+
+        Applied to BOTH the interaction-energy prediction and the
+        reference-subtracted target before the energy loss.
+        """
+        if self.atom_avg:
+            x = x / graph.n_node
+        return self.normalizer(x)
 
     def absolute_energy(self, interaction_energy: jax.Array, graph) -> jax.Array:
         """interaction energy + fixed reference. Constant w.r.t. positions/params."""

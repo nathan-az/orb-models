@@ -11,6 +11,7 @@ full energy -> forces/stress autograd through the assembled model.
 import types
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
@@ -30,7 +31,9 @@ from orb_models.forcefield.models.forcefield_utils import (
 )
 from orb_models.forcefield.models.jax.conservative_regressor import (
     ConservativeRegressor,
+    compute_grads_reverse,
     predict,
+    total_loss,
 )
 from orb_models.forcefield.models.jax.forcefield_heads import EnergyHead
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
@@ -149,3 +152,31 @@ def test_conservative_regressor_matches_torch(helpers, key):
     # conservative stress: jax (G,3,3) -> Voigt-6 to match torch
     jax_stress_voigt = torch_full_3x3_to_voigt_6_stress(torch.tensor(np.asarray(preds.stress)))
     helpers.assert_close(jnp.asarray(jax_stress_voigt.numpy()), out["stress"])
+
+
+def test_real_loss_and_grads_run(helpers, key):
+    """The rewired _total_loss (reference + normalizers + condhuber + Voigt stress)
+    runs end-to-end, and the second-order training grad path executes."""
+    import equinox as eqx
+
+    torch_model, jax_model = _build(key)
+    jax_model = helpers.copy_conservative_regressor(jax_model, torch_model)
+
+    a = _arrays()
+    jax_graph = jgb.to_jax(_torch_graph(a))
+    rng = np.random.default_rng(7)
+    targets = {
+        "energy": jnp.asarray(rng.standard_normal(a["G"])),  # absolute (G,)
+        "forces": jnp.asarray(rng.standard_normal((a["N"], 3))),  # (N,3)
+        "stress": jnp.asarray(rng.standard_normal((a["G"], 6))),  # Voigt-6
+    }
+    weights = {"energy": 1.0, "forces": 1.0, "stress": 1.0}
+
+    loss, breakdown = total_loss(jax_model, jax_graph, targets, weights)
+    assert np.isfinite(np.asarray(loss))
+    assert set(breakdown) == {"energy", "forces", "stress", "total"}
+
+    grads, _ = compute_grads_reverse(jax_model, jax_graph, targets, weights)
+    # trainable backbone grads exist and are finite (second-order path executed)
+    leaves = jax.tree.leaves(eqx.filter(grads.gns, eqx.is_inexact_array))
+    assert leaves and all(np.isfinite(np.asarray(g)).all() for g in leaves)

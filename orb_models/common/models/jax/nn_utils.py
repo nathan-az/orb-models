@@ -144,7 +144,9 @@ class MLPAndLayerNorm(eqx.Module):
         return x
 
 
-def polynomial_cutoff(r: jax.Array, r_max: jax.Array | float, p: int = 4) -> jax.Array:
+def polynomial_cutoff(
+    r: jax.Array, r_max: jax.Array | float, p: int = 4
+) -> jax.Array:
     """Polynomial envelope going smoothly to 0 at r_max (and exactly 0 beyond).
 
     Shared by the attention cutoff (p=4, scalar r_max) and ZBL repulsion (p=6,
