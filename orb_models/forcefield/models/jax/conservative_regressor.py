@@ -54,6 +54,7 @@ class ConservativeRegressor(eqx.Module):
 
     gns: MoleculeGNS
     energy_head: eqx.Module
+    pair_repulsion: eqx.Module | None = None
 
 
 class Predictions(eqx.Module):
@@ -100,7 +101,12 @@ def energy_fn(
     graph = eqx.tree_at(lambda g: g.edge_features["vectors"], graph, vectors)
 
     out = model.gns(graph)
-    return model.energy_head(out["node_features"], graph)  # (G,)
+    interaction = model.energy_head(out["node_features"], graph)  # (G,)
+    # ZBL repulsion (if present) is just another energy term sharing the same
+    # differentiable `vectors`, so it flows into forces/stress via the outer grad.
+    if model.pair_repulsion is not None:
+        interaction = interaction + model.pair_repulsion(graph)
+    return interaction
 
 
 def _zero_grad_targets(graph: JaxAtomGraphs) -> tuple[jax.Array, jax.Array, jax.Array]:

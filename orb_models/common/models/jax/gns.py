@@ -15,7 +15,7 @@ from orb_models.common.models.jax.nn_utils import (
     MLP,
     MLPAndLayerNorm,
     TensorLinear,
-    get_cutoff,
+    get_cutoff_p4,
 )
 
 
@@ -398,7 +398,7 @@ class MoleculeGNS(eqx.Module):
 
         nodes, edges = self._encoder(node_features, edge_features)
 
-        cutoff = get_cutoff(
+        cutoff = get_cutoff_p4(
             jnp.linalg.norm(batch.edge_features["vectors"], axis=-1)
         )
         for gnn in self.gnn_stacks:
@@ -437,7 +437,7 @@ class MoleculeGNS(eqx.Module):
         rbfs = self.rbf_transform(lengths)
 
         if self.outer_product_with_cutoff:
-            cutoff = get_cutoff(lengths)
+            cutoff = get_cutoff_p4(lengths)
             outer_product = rbfs[:, :, None] * angular_embedding[:, None, :]
             edge_features = cutoff * outer_product.reshape(
                 vectors.shape[0], self.edge_embed_size

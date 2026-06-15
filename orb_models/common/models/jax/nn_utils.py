@@ -144,14 +144,22 @@ class MLPAndLayerNorm(eqx.Module):
         return x
 
 
-def get_cutoff(r: jax.Array, r_max: float = 6.0) -> jax.Array:
-    """Get a hardcoded cutoff function for attention. Default cutoff is 6 angstrom."""
-    p = 4  # polynomial order
-    envelope: jax.Array = (
+def polynomial_cutoff(r: jax.Array, r_max: jax.Array | float, p: int = 4) -> jax.Array:
+    """Polynomial envelope going smoothly to 0 at r_max (and exactly 0 beyond).
+
+    Shared by the attention cutoff (p=4, scalar r_max) and ZBL repulsion (p=6,
+    per-edge r_max). Returns the same shape as `r`.
+    """
+    ratio = r / r_max
+    envelope = (
         1.0
-        - ((p + 1.0) * (p + 2.0) / 2.0) * jnp.pow(r / r_max, p)
-        + p * (p + 2.0) * jnp.pow(r / r_max, p + 1)
-        - (p * (p + 1.0) / 2) * jnp.pow(r / r_max, p + 2)
+        - ((p + 1.0) * (p + 2.0) / 2.0) * jnp.pow(ratio, p)
+        + p * (p + 2.0) * jnp.pow(ratio, p + 1)
+        - (p * (p + 1.0) / 2) * jnp.pow(ratio, p + 2)
     )
-    cutoff = jnp.expand_dims(envelope * (r < r_max), axis=-1)
-    return cutoff
+    return envelope * (r < r_max)
+
+
+def get_cutoff_p4(r: jax.Array, r_max: float = 6.0) -> jax.Array:
+    """Attention cutoff (p=4) with a trailing feature axis for broadcasting."""
+    return jnp.expand_dims(polynomial_cutoff(r, r_max, p=4), axis=-1)
