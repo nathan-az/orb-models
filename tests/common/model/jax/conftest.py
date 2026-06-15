@@ -157,6 +157,25 @@ def copy_molecule_gns(jax_model, torch_model):
     return jax_model
 
 
+def copy_energy_head(jax_head, torch_head):
+    """Share an EnergyHead's MLP + the fixed normalizer/reference buffers."""
+    jax_head = eqx.tree_at(lambda m: m.mlp, jax_head, copy_mlp(jax_head.mlp, torch_head.mlp))
+    jax_head = eqx.tree_at(
+        lambda m: m.normalizer.mean, jax_head, to_jax(torch_head.normalizer.bn.running_mean)
+    )
+    jax_head = eqx.tree_at(
+        lambda m: m.normalizer.std,
+        jax_head,
+        to_jax(torch.sqrt(torch_head.normalizer.bn.running_var)),
+    )
+    jax_head = eqx.tree_at(
+        lambda m: m.reference.coefficients,
+        jax_head,
+        to_jax(torch_head.reference.linear.weight).reshape(-1),
+    )
+    return jax_head
+
+
 @pytest.fixture
 def helpers():
     """Namespace of comparison + weight-copy helpers used across test modules."""
@@ -172,4 +191,5 @@ def helpers():
         copy_attention_network=copy_attention_network,
         copy_decoder=copy_decoder,
         copy_molecule_gns=copy_molecule_gns,
+        copy_energy_head=copy_energy_head,
     )
