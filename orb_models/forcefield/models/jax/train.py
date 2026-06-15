@@ -36,6 +36,11 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
     update_normalizer_buffers,
 )
 
+# The two interchangeable d(loss)/d(model) paths. `compute_grads_jvp` is the
+# default everywhere; `compute_grads_reverse` exists so the benchmark can time
+# the naive reverse-over-reverse path against the forward-over-reverse one.
+GradFn = type(compute_grads_jvp)
+
 
 def _onecycle_cos_schedule(
     initial: float, peak: float, final: float, total_steps: int, pct_start: float
@@ -136,12 +141,18 @@ def train_step(
     *,
     optimizer: optax.GradientTransformation,
     has_stress: bool = True,
+    grad_fn: GradFn = compute_grads_jvp,
 ) -> tuple[ConservativeRegressor, optax.OptState, dict[str, jax.Array]]:
     """One supervised step: buffers, grads, partition, optimiser, recombine.
 
     Order matters: the buffers are advanced from the TARGETS first (torch's
     side-effect-inside-the-loss made explicit), then the loss/grads are taken on
     that updated model -- so the normalization the loss uses is this step's stats.
+
+    `grad_fn` selects the gradient path; it defaults to the forward-over-reverse
+    `compute_grads_jvp` and can be swapped for `compute_grads_reverse` (same
+    signature) to benchmark the naive path. The partition below drops any buffer
+    grads, so either path is safe here.
     """
     spec = trainable_filter(model)
 
@@ -152,7 +163,7 @@ def train_step(
     # d(loss)/d(model). The jvp path already returns a zero cotangent for the
     # buffers; the reverse path would return a *nonzero* one. We do not rely on
     # that -- step (partition) drops the buffer grads either way.
-    grads, breakdown = compute_grads_jvp(
+    grads, breakdown = grad_fn(
         model, graph, targets, weights, has_stress=has_stress
     )
 
@@ -175,13 +186,14 @@ def make_train_step(
     weights: dict[str, float],
     *,
     has_stress: bool = True,
+    grad_fn: GradFn = compute_grads_jvp,
 ):
     """jit-compiled closure over the non-array config (optimizer/weights/has_stress).
 
     `eqx.filter_jit` traces the array leaves of (model, opt_state, graph, targets)
     and treats everything else as static, so closing over `optimizer`/`weights`
     keeps the jitted signature clean. This is the form the throughput/memory
-    benchmark will time.
+    benchmark times; `grad_fn` picks the jvp (default) or reverse path.
     """
 
     @eqx.filter_jit
@@ -194,6 +206,7 @@ def make_train_step(
             weights,
             optimizer=optimizer,
             has_stress=has_stress,
+            grad_fn=grad_fn,
         )
 
     return step
