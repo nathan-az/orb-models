@@ -33,12 +33,16 @@ def _data():
 
 
 def _jax_graph(n_node, per_node, z, senders, receivers, vectors):
+    one_hot = np.eye(118)[z - 1]  # argmax(one_hot)+1 == physical Z, matching torch
     return types.SimpleNamespace(
         senders=jnp.asarray(senders),
         receivers=jnp.asarray(receivers),
         n_node=jnp.asarray(n_node),
         per_node_graph_index=jnp.asarray(per_node),
-        node_features={"atomic_numbers": jnp.asarray(z)},
+        node_features={
+            "atomic_numbers": jnp.asarray(z),
+            "atomic_numbers_embedding": jnp.asarray(one_hot),
+        },
         edge_features={"vectors": jnp.asarray(vectors)},
     )
 

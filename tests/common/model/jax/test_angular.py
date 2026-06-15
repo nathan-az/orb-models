@@ -12,8 +12,13 @@ import numpy as np
 import pytest
 import torch
 
+from orb_models.common.models.angular import SphericalHarmonics as TorchSphericalHarmonics
 from orb_models.common.models.angular import UnitVector as TorchUnitVector
-from orb_models.common.models.jax.angular import StableNormalize, UnitVector
+from orb_models.common.models.jax.angular import (
+    SphericalHarmonics,
+    StableNormalize,
+    UnitVector,
+)
 
 
 @pytest.fixture
@@ -63,6 +68,44 @@ def test_stable_normalize_finite_hessian_at_zero():
     x = jnp.zeros((1, 3))
     hess = jax.hessian(lambda z: StableNormalize()(z).sum())(x)
     assert np.isfinite(np.asarray(hess)).all()
+
+
+@pytest.mark.parametrize("lmax", [0, 1, 2, 3, 4])
+@pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
+def test_spherical_harmonics_matches_torch(helpers, vectors, lmax, normalization):
+    """jax SH equals torch SH for every ported lmax and normalization scheme.
+
+    normalize=True (the orb-v3 setting) projects onto the unit sphere first.
+    """
+    jx = SphericalHarmonics(lmax, normalize=True, normalization=normalization)
+    tx = TorchSphericalHarmonics(lmax, normalize=True, normalization=normalization)
+    assert jx.dim == tx.dim == (lmax + 1) ** 2
+    jax_out = jx(jnp.asarray(vectors))
+    torch_out = tx(torch.tensor(vectors))
+    helpers.assert_close(jax_out, torch_out)
+
+
+def test_spherical_harmonics_unnormalized_matches_torch(helpers, vectors):
+    """normalize=False: SH of the raw (non-unit) vectors must also match torch."""
+    jx = SphericalHarmonics(3, normalize=False, normalization="component")
+    tx = TorchSphericalHarmonics(3, normalize=False, normalization="component")
+    helpers.assert_close(jx(jnp.asarray(vectors)), tx(torch.tensor(vectors)))
+
+
+def test_spherical_harmonics_grad_matches_torch(helpers, vectors):
+    """First derivative agrees with torch autograd (SH is on the force path)."""
+    jx = SphericalHarmonics(3, normalize=True, normalization="component")
+    tx = TorchSphericalHarmonics(3, normalize=True, normalization="component")
+    jax_grad = jax.grad(lambda x: jnp.sum(jnp.sin(jx(x))))(jnp.asarray(vectors))
+    t = torch.tensor(vectors, requires_grad=True)
+    torch.sin(tx(t)).sum().backward()
+    helpers.assert_close(jax_grad, t.grad)
+
+
+def test_spherical_harmonics_lmax_guard():
+    """lmax beyond the ported table raises rather than silently misbehaving."""
+    with pytest.raises(NotImplementedError):
+        SphericalHarmonics(5, normalize=True, normalization="component")
 
 
 def test_stable_normalize_second_order_consistency(vectors):

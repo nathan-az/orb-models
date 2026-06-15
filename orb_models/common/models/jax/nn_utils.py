@@ -38,8 +38,36 @@ class TensorLayerNorm(eqx.nn.LayerNorm):
         return tensor_apply(super().__call__, x, len(self.shape))
 
 
+class TensorRMSNorm(eqx.Module):
+    """RMS norm matching torch `nn.RMSNorm`: scales by 1/rms over the last dim and a
+    learnable `weight`, with NO bias and NO mean subtraction.
+
+    torch `nn.RMSNorm(shape)` leaves `eps=None`, which `F.rms_norm` resolves to
+    `finfo(dtype).eps` per call -- so we do the same (not a fixed 1e-5) to stay
+    bit-parity across float32/float64. Constructed as `TensorRMSNorm(out_dim)` to
+    match the `norm_fn(out_dim)` call site, like `TensorLayerNorm`.
+    """
+
+    weight: jax.Array
+    shape: tuple = eqx.field(static=True)
+    eps: float | None = eqx.field(static=True)
+
+    def __init__(self, shape, eps: float | None = None):
+        self.shape = (shape,) if isinstance(shape, int) else tuple(shape)
+        self.eps = eps
+        self.weight = jnp.ones(self.shape)
+
+    def _norm(self, x: jax.Array) -> jax.Array:
+        eps = self.eps if self.eps is not None else jnp.finfo(x.dtype).eps
+        inv_rms = jax.lax.rsqrt(jnp.mean(x**2) + eps)
+        return x * inv_rms * self.weight
+
+    def __call__(self, x: jax.Array) -> jax.Array:
+        return tensor_apply(self._norm, x, len(self.shape))
+
+
 def get_layer_norm(norm_type: str):
-    norms = {"layer_norm": TensorLayerNorm}
+    norms = {"layer_norm": TensorLayerNorm, "rms_norm": TensorRMSNorm}
     norm = norms.get(norm_type)
     if norm is None:
         raise ValueError(f"Unknown layer norm: {norm_type}")

@@ -27,6 +27,7 @@ import equinox as eqx
 import optax
 
 import jax
+import jax.numpy as jnp
 from orb_models.common.atoms.jax.graph_batch import JaxAtomGraphs
 from orb_models.forcefield.models.jax.conservative_regressor import (
     ConservativeRegressor,
@@ -36,6 +37,34 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
 )
 
 
+def _onecycle_cos_schedule(
+    initial: float, peak: float, final: float, total_steps: int, pct_start: float
+):
+    """Torch `OneCycleLR` (anneal_strategy='cos', two-phase) as a step->value fn.
+
+    optax's stock `cosine_onecycle_schedule` is NOT this curve -- it agrees with
+    torch only at step 0 and diverges from step 1 (different warmup ramp), so we
+    replicate torch's exact two-phase formula instead. Torch builds:
+        phase 0 (warmup): step 0 .. pct_start*total_steps-1, anneal initial -> peak
+        phase 1 (anneal): .. total_steps-1,                  anneal peak    -> final
+    with `anneal_cos(a, b, p) = b + (a-b)/2 * (cos(pi*p)+1)`. The same shape drives
+    both the LR (initial->peak->final) and, reversed, the momentum.
+    """
+    step0_end = pct_start * total_steps - 1.0
+    phase1_len = (total_steps - 1) - step0_end
+
+    def cos(a, b, p):
+        return b + (a - b) / 2.0 * (jnp.cos(jnp.pi * p) + 1.0)
+
+    def schedule(step):
+        step = step.astype(jnp.float64) if hasattr(step, "astype") else float(step)
+        warm = cos(initial, peak, step / step0_end)
+        anneal = cos(peak, final, (step - step0_end) / phase1_len)
+        return jnp.where(step <= step0_end, warm, anneal)
+
+    return schedule
+
+
 def make_optimizer(
     lr: float,
     total_steps: int,
@@ -43,21 +72,45 @@ def make_optimizer(
     div_factor: float = 10.0,
     final_div_factor: float = 10.0,
     pct_start: float = 0.05,
+    max_momentum: float = 0.95,
+    base_momentum: float = 0.85,
 ) -> optax.GradientTransformation:
-    """Plain Adam + cosine OneCycle, mirroring torch `get_optim`.
+    """Plain Adam + OneCycle, faithfully mirroring torch `get_optim`.
 
-    torch passes `max_lr=lr*div_factor`; optax's `peak_value` IS that max. Then
-    initial_lr = peak/div_factor = lr and final_lr = initial/final_div_factor.
+    torch passes `max_lr=lr*div_factor` to `OneCycleLR`, so:
+        peak_lr    = lr * div_factor      (the cycle's max)
+        initial_lr = peak_lr / div_factor = lr
+        final_lr   = initial_lr / final_div_factor
     optax.adam (not adamw) has no weight decay, matching orb.
+
+    Two things the stock optax one-cycle does NOT reproduce, both fixed here:
+      * the LR *curve* -- replicated exactly via `_onecycle_cos_schedule` (the stock
+        schedule only matches torch at step 0);
+      * `OneCycleLR`'s default `cycle_momentum=True` -- torch anneals Adam's beta1
+        between `max_momentum` and `base_momentum`, in the OPPOSITE direction to the
+        LR (high momentum at low LR). beta1 cancels in the step-1 bias correction, so
+        this only bites from step 2 on. We schedule beta1 with `inject_hyperparams`
+        so optax accumulates/bias-corrects with the same per-step beta1 as torch.
     """
-    schedule = optax.cosine_onecycle_schedule(
-        transition_steps=total_steps,
-        peak_value=lr * div_factor,
+    peak_lr = lr * div_factor
+    lr_schedule = _onecycle_cos_schedule(
+        initial=peak_lr / div_factor,
+        peak=peak_lr,
+        final=(peak_lr / div_factor) / final_div_factor,
+        total_steps=total_steps,
         pct_start=pct_start,
-        div_factor=div_factor,
-        final_div_factor=final_div_factor,
     )
-    return optax.adam(schedule)
+    # Momentum cycles the OTHER way: starts at max, dips to base at peak LR, back up.
+    b1_schedule = _onecycle_cos_schedule(
+        initial=max_momentum,
+        peak=base_momentum,
+        final=max_momentum,
+        total_steps=total_steps,
+        pct_start=pct_start,
+    )
+    return optax.inject_hyperparams(optax.adam)(
+        learning_rate=lr_schedule, b1=b1_schedule
+    )
 
 
 def init_opt_state(

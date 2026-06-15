@@ -52,7 +52,14 @@ class ZBLBasis(eqx.Module):
         a_prefactor = jax.lax.stop_gradient(self.a_prefactor)
 
         senders, receivers = graph.senders, graph.receivers
-        Z = graph.node_features["atomic_numbers"]  # physical Z (1..118)
+        # Derive Z exactly as torch ZBL does: argmax(one_hot) + 1, NOT the raw
+        # `atomic_numbers` field. The released adapter builds
+        # `atomic_numbers_embedding = one_hot(Z, 118)` (index == Z), so argmax+1
+        # gives Z+1 -- a quirk of the shipped model that we must reproduce for
+        # parity. (With a one_hot(Z-1) graph, argmax+1 == Z, so this also matches
+        # the equivalence-test graphs.)
+        # TODO: confirm that this bug is here to stay
+        Z = jnp.argmax(graph.node_features["atomic_numbers_embedding"], axis=1) + 1
         Z_u = Z[senders].astype(c.dtype)
         Z_v = Z[receivers].astype(c.dtype)
 
