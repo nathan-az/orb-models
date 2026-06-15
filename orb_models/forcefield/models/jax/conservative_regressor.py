@@ -118,18 +118,34 @@ def update_normalizer_buffers(
 def trainable_filter(model: ConservativeRegressor) -> ConservativeRegressor:
     """Bool pytree (True=trainable) for `eqx.partition`/`eqx.filter_grad`.
 
-    True on every inexact-array param, but False on the three normalizers' running
-    mean/std/count -- those are data statistics advanced by `update_normalizer_buffers`,
-    so the optimiser must leave them alone. Use as:
+    True on every inexact-array param, but False on the leaves that torch holds
+    frozen, so the jax optimiser trains exactly the torch-trainable set:
+      * the Bessel `rbf_transform` (bessel_weights + prefactor) -- torch builds these
+        with `trainable=False` (a `register_buffer`) for the released conservative
+        models, so they are fixed basis constants, not params;
+      * the three normalizers' running mean/std/count -- data statistics advanced
+        by `update_normalizer_buffers`, not the optimiser (torch BatchNorm buffers);
+      * the energy `reference` coefficients -- a fixed linear reference energy
+        (torch sets `reference.linear.weight.requires_grad = False`). The loss DOES
+        depend on it (target = energy - reference), so jax.grad returns a nonzero
+        grad here; without this mask the optimiser would train it, diverging from torch;
+      * the ZBL `pair_repulsion` constants -- fixed physical parameters (torch
+        `register_buffer`, no grad).
+    Use as:
         grads = eqx.filter_grad(loss)(model, ...)  # then mask, OR
         params, static = eqx.partition(model, trainable_filter(model))
     """
     spec = jax.tree_util.tree_map(eqx.is_inexact_array, model)
-    for getter in (
+    getters = [
+        lambda m: m.gns.rbf_transform,
         lambda m: m.energy_head.normalizer,
+        lambda m: m.energy_head.reference,
         lambda m: m.grad_forces_normalizer,
         lambda m: m.grad_stress_normalizer,
-    ):
+    ]
+    if model.pair_repulsion is not None:
+        getters.append(lambda m: m.pair_repulsion)
+    for getter in getters:
         spec = eqx.tree_at(
             getter, spec, replace=jax.tree_util.tree_map(lambda _: False, getter(spec))
         )
