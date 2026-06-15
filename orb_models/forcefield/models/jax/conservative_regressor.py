@@ -63,7 +63,8 @@ class ConservativeRegressor(eqx.Module):
     energy_head: eqx.Module
     pair_repulsion: eqx.Module | None = None
     # Force/stress target normalizers (torch grad_forces/grad_stress_normalizer).
-    # Fixed buffers, not params -- default to identity until copied/fit.
+    # Online stat buffers, not params -- default to identity until fit/copied. Their
+    # running mean/std are advanced by `update_normalizer_buffers` (not the optimiser).
     grad_forces_normalizer: ScalarNormalizer = eqx.field(
         default_factory=lambda: ScalarNormalizer(mean=jnp.zeros(1), std=jnp.ones(1))
     )
@@ -71,6 +72,68 @@ class ConservativeRegressor(eqx.Module):
         default_factory=lambda: ScalarNormalizer(mean=jnp.zeros(1), std=jnp.ones(1))
     )
     forces_loss_type: str = eqx.field(static=True, default="condhuber_0.01")
+
+
+def update_normalizer_buffers(
+    model: ConservativeRegressor,
+    targets: dict[str, jax.Array],
+    graph: JaxAtomGraphs,
+) -> ConservativeRegressor:
+    """Online update of all target normalizers from the TARGETS; returns a new model.
+
+    This is torch's `online=None` path made explicit: the running mean/std track the
+    ground-truth target distribution (never the predictions). torch hides this as a
+    side-effect inside the loss; here it is a separate, pure step you call ONCE per
+    train step BEFORE the loss, threading the returned model forward. For eval, just
+    don't call it (or flip the model with `eqx.nn.inference_mode`, which makes every
+    `update` a no-op). The energy target is reference-subtracted and per-atom-averaged
+    to match what `EnergyHead.normalize_for_loss` feeds the normalizer.
+    """
+    head = model.energy_head
+    n_graphs = graph.n_node.shape[0]
+    reference = head.reference(
+        graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
+    )
+    interaction_target = targets["energy"] - reference
+    if head.atom_avg:
+        interaction_target = interaction_target / graph.n_node
+
+    model = eqx.tree_at(
+        lambda m: m.energy_head.normalizer, model, head.normalizer.update(interaction_target)
+    )
+    model = eqx.tree_at(
+        lambda m: m.grad_forces_normalizer,
+        model,
+        model.grad_forces_normalizer.update(targets["forces"]),
+    )
+    if "stress" in targets:
+        model = eqx.tree_at(
+            lambda m: m.grad_stress_normalizer,
+            model,
+            model.grad_stress_normalizer.update(targets["stress"]),
+        )
+    return model
+
+
+def trainable_filter(model: ConservativeRegressor) -> ConservativeRegressor:
+    """Bool pytree (True=trainable) for `eqx.partition`/`eqx.filter_grad`.
+
+    True on every inexact-array param, but False on the three normalizers' running
+    mean/std/count -- those are data statistics advanced by `update_normalizer_buffers`,
+    so the optimiser must leave them alone. Use as:
+        grads = eqx.filter_grad(loss)(model, ...)  # then mask, OR
+        params, static = eqx.partition(model, trainable_filter(model))
+    """
+    spec = jax.tree_util.tree_map(eqx.is_inexact_array, model)
+    for getter in (
+        lambda m: m.energy_head.normalizer,
+        lambda m: m.grad_forces_normalizer,
+        lambda m: m.grad_stress_normalizer,
+    ):
+        spec = eqx.tree_at(
+            getter, spec, replace=jax.tree_util.tree_map(lambda _: False, getter(spec))
+        )
+    return spec
 
 
 class Predictions(eqx.Module):

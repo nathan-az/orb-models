@@ -30,6 +30,31 @@ def _matched_normalizer(mean, std):
     return jax_norm, torch_norm
 
 
+def test_online_update_matches_torch(helpers):
+    """jax ScalarNormalizer.update reproduces torch's momentum=None running stats."""
+    import equinox as eqx
+
+    rng = np.random.default_rng(7)
+    batches = [rng.standard_normal((5, 3)) * 2.0 + 3.0 for _ in range(4)]
+
+    torch_norm = TorchScalarNormalizer(init_mean=3.0, init_std=1.0, init_num_batches=0)
+    torch_norm.train()
+    jax_norm = ScalarNormalizer(mean=jnp.asarray([3.0]), std=jnp.asarray([1.0]))
+
+    for b in batches:
+        torch_norm(torch.tensor(b))  # side-effect: advance running stats
+        jax_norm = jax_norm.update(jnp.asarray(b))
+
+    helpers.assert_close(jax_norm.mean, torch_norm.bn.running_mean)
+    helpers.assert_close(jax_norm.std, torch.sqrt(torch_norm.bn.running_var))
+
+    # inference mode (== torch eval/online=False) freezes the stats.
+    frozen = eqx.nn.inference_mode(jax_norm)
+    after = frozen.update(jnp.asarray(batches[0]))
+    np.testing.assert_array_equal(np.asarray(after.mean), np.asarray(jax_norm.mean))
+    np.testing.assert_array_equal(np.asarray(after.std), np.asarray(jax_norm.std))
+
+
 def test_conditional_huber_spans_all_bands(helpers):
     rng = np.random.default_rng(0)
     norms = np.array([10.0, 50.0, 150.0, 250.0, 350.0, 500.0])  # one per band edge

@@ -5,19 +5,22 @@ EnergyHead (+ its ScalarNormalizer and LinearReferenceEnergy). ConfidenceHead,
 stress/charge heads etc. are deferred -- they do not feed the conservative
 force/stress path.
 
-Buffer note: `ScalarNormalizer` (mean/std) and `LinearReferenceEnergy`
-(coefficients) hold FIXED statistics, not trainable params. They are float
-arrays, so `eqx.filter_grad`'s default `is_inexact_array` filter would compute
-gradients for them -- partition them out before the optimiser step once training
-for real. They are constant w.r.t. positions, so they never affect forces/stress.
+Buffer note: `ScalarNormalizer` (mean/std/count) and `LinearReferenceEnergy`
+(coefficients) hold STATISTICS, not gradient-trained params. The normalizer mean/std
+track the target distribution via an online running average (torch BatchNorm
+momentum=None), updated OUTSIDE backprop -- never by the optimiser. They are float
+arrays, so `eqx.filter_grad`'s default `is_inexact_array` filter would still compute
+gradients for them; exclude them with `conservative_regressor.trainable_filter`
+before the optimiser step. They are constant w.r.t. positions, so they never affect
+forces/stress.
 """
 
 from __future__ import annotations
 
 import equinox as eqx
+
 import jax
 import jax.numpy as jnp
-
 from orb_models.common.models.jax.nn_utils import MLP
 
 
@@ -39,20 +42,62 @@ def aggregate_nodes(
 
 
 class ScalarNormalizer(eqx.Module):
-    """Fixed affine (de)normalizer. torch ScalarNormalizer in eval mode.
+    """Affine (de)normalizer with an online running mean/std. Port of torch
+    ScalarNormalizer (a BatchNorm1d(momentum=None) used only as a stat accumulator).
 
     forward:  (x - mean) / std            (normalize a target)
     inverse:  x * std + mean              (denormalize a prediction)
+
+    `update(x)` advances the running stats by one batch using BatchNorm's
+    momentum=None *cumulative* average (every batch weighted equally, count-driven),
+    matching torch exactly: running_var tracks the UNBIASED batch variance, and the
+    update is a no-op for <2 samples. It returns a NEW normalizer (no in-place state)
+    -- thread the result through your train step.
+
+    `inference` is the JAX analogue of torch `.eval()`/`online=False`: when True,
+    `update` is a no-op so the stats freeze. Toggle a whole model's flags with
+    `eqx.nn.inference_mode(model)` (and `value=False` to go back to training).
+    Predictions are always normalized with the *current* stats, so flipping the flag
+    only stops the stats from moving -- it never changes the affine itself.
     """
 
     mean: jax.Array  # (1,)
     std: jax.Array  # (1,)
+    count: jax.Array = eqx.field(
+        default_factory=lambda: jnp.zeros(())
+    )  # batches tracked
+    inference: bool = (
+        False  # eval mode: freeze the running stats (no online update)
+    )
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return (x - self.mean) / self.std
 
     def inverse(self, x: jax.Array) -> jax.Array:
         return x * self.std + self.mean
+
+    def update(self, x: jax.Array) -> "ScalarNormalizer":
+        """Online cumulative-average update from a TARGET tensor. Returns a new
+        normalizer; no-op in inference mode or for <2 flattened samples."""
+        flat = x.reshape(-1)
+        if self.inference or flat.shape[0] <= 1:
+            return self
+        count = self.count + 1.0
+        exponential_average_factor = (
+            1.0 / count
+        )  # momentum=None -> 1/num_batches_tracked (equal weight)
+        new_mean = (
+            1.0 - exponential_average_factor
+        ) * self.mean + exponential_average_factor * flat.mean()
+        new_var = (
+            1.0 - exponential_average_factor
+        ) * self.std**2 + exponential_average_factor * flat.var(ddof=1)
+        return ScalarNormalizer(
+            mean=new_mean,
+            std=jnp.sqrt(new_var),
+            count=count,
+            inference=self.inference,
+        )
 
 
 class LinearReferenceEnergy(eqx.Module):
@@ -71,7 +116,9 @@ class LinearReferenceEnergy(eqx.Module):
         n_graphs: int,
     ) -> jax.Array:
         per_atom = self.coefficients[atomic_numbers]  # (N,)
-        return jax.ops.segment_sum(per_atom, per_node_graph_index, n_graphs)  # (G,)
+        return jax.ops.segment_sum(
+            per_atom, per_node_graph_index, n_graphs
+        )  # (G,)
 
 
 class EnergyHead(eqx.Module):
@@ -112,7 +159,10 @@ class EnergyHead(eqx.Module):
         """Interaction energy (G,) -- the quantity forces/stress differentiate."""
         reduction = "mean" if self.atom_avg else "sum"
         aggregated = aggregate_nodes(
-            node_features, graph.per_node_graph_index, graph.n_node, reduction=reduction
+            node_features,
+            graph.per_node_graph_index,
+            graph.n_node,
+            reduction=reduction,
         )
         mlp_out = self.mlp(aggregated).squeeze(-1)  # (G,)
         energy = self.normalizer.inverse(mlp_out)
@@ -130,10 +180,14 @@ class EnergyHead(eqx.Module):
             x = x / graph.n_node
         return self.normalizer(x)
 
-    def absolute_energy(self, interaction_energy: jax.Array, graph) -> jax.Array:
+    def absolute_energy(
+        self, interaction_energy: jax.Array, graph
+    ) -> jax.Array:
         """interaction energy + fixed reference. Constant w.r.t. positions/params."""
         n_graphs = graph.n_node.shape[0]
         ref = self.reference(
-            graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
+            graph.node_features["atomic_numbers"],
+            graph.per_node_graph_index,
+            n_graphs,
         )
         return interaction_energy + ref

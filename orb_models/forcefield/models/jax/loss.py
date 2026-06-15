@@ -4,11 +4,11 @@ The actual orb conservative model uses:
   * forces: condhuber_0.01  (MACE conditional Huber)
   * stress: huber_0.01
   * energy: huber_0.01      (on reference-subtracted, normalized interaction energy)
-Each is computed on *normalized* quantities: target/pred are passed through a fixed
-affine `ScalarNormalizer` ((x - mean)/std) before the elementwise loss. Online
-running-stat updates (torch BatchNorm momentum=None) are training STATE, not ported
-here -- frozen stats (eval) are what these functions assume; thread updated stats in
-the train step if you want online behaviour.
+Each is computed on *normalized* quantities: target/pred are passed through an affine
+`ScalarNormalizer` ((x - mean)/std) before the elementwise loss. These functions read
+the normalizer's CURRENT stats and never mutate them -- the online running-stat update
+(torch BatchNorm momentum=None) lives in `conservative_regressor.update_normalizer_buffers`,
+called once per train step on the targets before the loss (see that function).
 """
 
 from __future__ import annotations
