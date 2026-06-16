@@ -39,6 +39,14 @@ Run once per jax grad path (jvp / reverse) so an update driven by either stays
 locked to torch -- the two paths are already proven equal in test_grad_equivalence,
 so we don't re-compare them to each other here.
 
+PADDING (the `padded` parametrization): the jax side additionally runs through
+`pad_to_bucket` + `pad_targets` -- the SAME systems topped up with a dummy padding
+graph/atoms/edges to a larger fixed bucket. torch always runs the unpadded
+multi-example batch. So the `padded` case proves the headline property of the
+packing+padding work: a packed+padded+masked jax step is bit-for-bit (fp64) the same
+training as torch's canonical disjoint batch -- loss, grads, and the optimiser
+trajectory across two updates -- with the padding excluded everywhere by the masks.
+
 Normalizers are FROZEN (online=False / inference no-op) so the only thing moving
 between steps is the weights via the optimiser. Buffer-update parity (torch BatchNorm
 momentum vs `update_normalizer_buffers`) is a separate equivalence question; freezing
@@ -61,7 +69,14 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
     total_loss,
     trainable_filter,
 )
-from orb_models.forcefield.models.jax.train import init_opt_state, make_optimizer
+from orb_models.forcefield.models.jax.conservative_regressor import (
+    update_normalizer_buffers,
+)
+from orb_models.forcefield.models.jax.train import (
+    init_opt_state,
+    make_optimizer,
+    train_step,
+)
 from tests.common.model.jax.test_conservative_regressor import (
     _arrays,
     _build_real_features,
@@ -115,10 +130,11 @@ def _jax_update(model, opt_state, optimizer, grad_fn, graph, targets):
     return eqx.combine(params, static), opt_state
 
 
+@pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
 @pytest.mark.parametrize(
     "grad_fn", [compute_grads_jvp, compute_grads_reverse], ids=["jvp", "reverse"]
 )
-def test_two_train_steps_match_torch(helpers, key, grad_fn):
+def test_two_train_steps_match_torch(helpers, key, grad_fn, padded):
     torch_model, jax_model = _build_real_features(key)
     _freeze_norm_stats(torch_model)  # non-trivial, FROZEN stats on both sides
     jax_model = helpers.copy_conservative_regressor(jax_model, torch_model)
@@ -131,6 +147,12 @@ def test_two_train_steps_match_torch(helpers, key, grad_fn):
     jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
     # jax graph is immutable across forwards (tree_at copies), so build it once.
     jax_graph = jgb.to_jax(_torch_graph(a))
+    if padded:
+        # Top the SAME systems up to a larger fixed bucket; torch stays unpadded.
+        # The masks must make every comparison below identical to the unpadded run.
+        n_pad, e_pad, g_pad = a["N"] + 6, a["E"] + 9, a["G"] + 2
+        jax_graph = jgb.pad_to_bucket(jax_graph, n_pad, e_pad, g_pad)
+        jax_targets = jgb.pad_targets(jax_targets, n_pad, g_pad)
 
     optimizer = make_optimizer(lr=LR, total_steps=TOTAL_STEPS)
     opt_state = init_opt_state(jax_model, optimizer)
@@ -208,3 +230,116 @@ def test_two_train_steps_match_torch(helpers, key, grad_fn):
     # Sanity: the optimiser actually moved the weights (not a vacuous pass).
     w1 = np.asarray(jax_model.gns._encoder.node_fn.mlp.layers[0].weight)  # type: ignore[attr-defined]
     assert not np.allclose(w0, w1)
+
+
+# --- live-normalizer equivalence (the buffer-update / masked-stats parity) ----
+#
+# The test above FREEZES the normalizers to isolate the optimiser. This one does
+# the opposite: it lets the running stats MOVE (torch BatchNorm momentum=None vs
+# jax `update_normalizer_buffers`) across two real `train_step`s, so a stat desync
+# would show up as a step-1 loss divergence well outside tolerance -- plus we assert
+# the mean/std/count of all three normalizers match torch each step. Under `padded`,
+# this is the missing check: that the MASKED jax update (padding atoms/graphs excluded)
+# equals torch's pooled update on the same systems. Single grad path (jvp); the stat
+# update is independent of the grad path, and the optimiser mirror is owned above.
+
+NORM_GETTERS = (
+    lambda m: m.energy_head.normalizer,
+    lambda m: m.grad_forces_normalizer,
+    lambda m: m.grad_stress_normalizer,
+)
+_TORCH_NORMS = (
+    lambda tm: tm.heads["energy"].normalizer,
+    lambda tm: tm.grad_forces_normalizer,
+    lambda tm: tm.grad_stress_normalizer,
+)
+
+
+def _set_online_stats(torch_model, count: int):
+    """Non-trivial ONLINE stats + a starting count, so the cumulative-average factor
+    1/(count+1) is actually exercised (not wiped by a first-step factor of 1.0)."""
+    for norm, (mean, std) in zip(
+        [t(torch_model) for t in _TORCH_NORMS], [(0.5, 2.0), (-0.3, 1.7), (0.1, 0.8)]
+    ):
+        norm.bn.running_mean = torch.tensor([mean])
+        norm.bn.running_var = torch.tensor([std**2])
+        norm.bn.num_batches_tracked = torch.tensor(count)
+        norm.online = True
+
+
+def _seed_jax_counts(jax_model, count: int):
+    """Mirror torch's starting `num_batches_tracked` into the jax normalizers (the
+    weight-copy shares mean/std but not the count)."""
+    for getter in NORM_GETTERS:
+        jax_model = eqx.tree_at(
+            lambda m: getter(m).count, jax_model, jnp.asarray(float(count))
+        )
+    return jax_model
+
+
+def _assert_norms_match(jax_model, torch_model, label):
+    for jget, tget in zip(NORM_GETTERS, _TORCH_NORMS):
+        jn, tn = jget(jax_model), tget(torch_model)
+        np.testing.assert_allclose(
+            float(np.asarray(jn.mean).reshape(())), tn.bn.running_mean.item(),
+            atol=1e-9, rtol=1e-7, err_msg=f"{label}: running mean")
+        np.testing.assert_allclose(
+            float(np.asarray(jn.std).reshape(())), torch.sqrt(tn.bn.running_var).item(),
+            atol=1e-9, rtol=1e-7, err_msg=f"{label}: running std")
+        np.testing.assert_allclose(
+            float(jn.count), float(tn.bn.num_batches_tracked),
+            err_msg=f"{label}: count")
+
+
+@pytest.mark.parametrize("padded", [False, True], ids=["unpadded", "padded"])
+def test_live_normalizer_two_steps_match_torch(helpers, key, padded):
+    torch_model, jax_model = _build_real_features(key)
+    _set_online_stats(torch_model, count=5)  # non-trivial, NOT frozen
+    jax_model = helpers.copy_conservative_regressor(jax_model, torch_model)
+    jax_model = _seed_jax_counts(jax_model, count=5)
+    torch_model.train()  # online stat updates happen; create_graph for forces/stress
+
+    a = _arrays()
+    targets = _targets_np(a)
+    jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
+    jax_graph = jgb.to_jax(_torch_graph(a))
+    if padded:
+        n_pad, e_pad, g_pad = a["N"] + 6, a["E"] + 9, a["G"] + 2
+        jax_graph = jgb.pad_to_bucket(jax_graph, n_pad, e_pad, g_pad)
+        jax_targets = jgb.pad_targets(jax_targets, n_pad, g_pad)
+
+    optimizer = make_optimizer(lr=LR, total_steps=TOTAL_STEPS)
+    opt_state = init_opt_state(jax_model, optimizer)
+    torch_opt, torch_sched = get_optim(LR, TOTAL_STEPS, torch_model)
+
+    for step in range(N_STEPS):
+        # torch: model.loss ADVANCES the stats (online) then computes the loss.
+        torch_graph = _torch_graph(a)  # torch forward mutates the batch
+        _set_targets(torch_graph, targets)
+        torch_opt.zero_grad(set_to_none=True)
+        torch_out = torch_model.loss(torch_graph)
+
+        # jax: train_step advances stats (masked, under padding) then loss+grads+optim.
+        jax_model, opt_state, jax_bd = train_step(
+            jax_model, opt_state, jax_graph, jax_targets, WEIGHTS, optimizer=optimizer
+        )
+
+        # (a) loss parity -- sensitive to BOTH weights and the just-advanced stats.
+        for jk, tk in LOSS_TERMS.items():
+            np.testing.assert_allclose(
+                np.asarray(jax_bd[jk]), torch_out.log[tk].detach().numpy(),
+                atol=1e-7, rtol=1e-6, err_msg=f"step {step}: {jk} loss")
+        np.testing.assert_allclose(
+            np.asarray(jax_bd["total"]), torch_out.loss.detach().numpy(),
+            atol=1e-7, rtol=1e-6, err_msg=f"step {step}: total loss")
+
+        # (b) the running stats themselves match (masked jax update == torch pooled).
+        _assert_norms_match(jax_model, torch_model, f"step {step}")
+
+        torch_out.loss.backward()
+        torch_opt.step()
+        torch_sched.step()
+
+    # Sanity: the stats actually moved from their seeded start (not a vacuous pass).
+    assert float(jax_model.grad_forces_normalizer.count) == 5 + N_STEPS
+    assert not np.isclose(float(np.asarray(jax_model.grad_forces_normalizer.std).reshape(())), 1.7)

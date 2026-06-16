@@ -156,20 +156,27 @@ def train_step(
     """
     spec = trainable_filter(model)
 
-    # (3) Advance the category-3 buffers. This is the ONLY thing allowed to move
-    #     the normalizer stats; the optimiser below never will.
-    model = update_normalizer_buffers(model, targets, graph)
+    # (3) Advance the category-3 buffers into `updated`. This is the ONLY thing
+    #     allowed to move the normalizer stats; the optimiser below never will.
+    #     We keep `model` (PRE-update stats) around on purpose -- see next.
+    updated = update_normalizer_buffers(model, targets, graph)
 
-    # d(loss)/d(model). The jvp path already returns a zero cotangent for the
-    # buffers; the reverse path would return a *nonzero* one. We do not rely on
-    # that -- step (partition) drops the buffer grads either way.
+    # d(loss)/d(model). FORWARD uses `model` (PRE-update stats), so the energy
+    # prediction is denormalized with this step's *old* stats -- matching torch,
+    # which runs the forward before advancing the running stats inside its loss.
+    # The LOSS NORMALIZATION uses `updated` (POST-update stats) via `loss_model`.
+    # The jvp path returns a zero cotangent for the buffers; reverse a nonzero one;
+    # the partition below drops buffer grads either way.
     grads, breakdown = grad_fn(
-        model, graph, targets, weights, has_stress=has_stress
+        model, graph, targets, weights, has_stress=has_stress, loss_model=updated
     )
 
     # (1)+(2)+(3) split. params = trainable weights (rest None); static = buffers
     #     + config (trainable None). Same spec applied to grads => buffer grads -> None.
-    params, static = eqx.partition(model, spec)
+    #     Partition `updated` so the kept buffers are the POST-update stats; its
+    #     trainable weights are identical to `model`'s (the update only moved buffers),
+    #     so they align with `grads` (taken w.r.t. `model`).
+    params, static = eqx.partition(updated, spec)
     grad_params, _ = eqx.partition(grads, spec)
 
     # The optimiser only ever sees `params` and `grad_params` -- the trainable half.

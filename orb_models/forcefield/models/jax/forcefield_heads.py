@@ -37,7 +37,11 @@ def aggregate_nodes(
     if reduction == "sum":
         return summed
     if reduction == "mean":
-        return summed / n_node[:, None]
+        # clamp >=1 so empty padding graphs (n_node=0) give 0/1=0, not 0/0=NaN.
+        # The differentiated energy is sum_g E_g, so a NaN here -- even on a graph
+        # later masked out of the loss -- would poison every gradient. Identity for
+        # real graphs (n_node>=1), so parity is untouched.
+        return summed / jnp.maximum(n_node, 1)[:, None]
     raise ValueError(f"unsupported reduction: {reduction}")
 
 
@@ -76,22 +80,37 @@ class ScalarNormalizer(eqx.Module):
     def inverse(self, x: jax.Array) -> jax.Array:
         return x * self.std + self.mean
 
-    def update(self, x: jax.Array) -> "ScalarNormalizer":
+    def update(
+        self, x: jax.Array, mask: jax.Array | None = None
+    ) -> "ScalarNormalizer":
         """Online cumulative-average update from a TARGET tensor. Returns a new
-        normalizer; no-op in inference mode or for <2 flattened samples."""
+        normalizer; no-op in inference mode or for <2 flattened samples.
+
+        `mask` (broadcastable to `x`) restricts the batch mean/var to the real rows
+        when `x` carries padding, so padded zeros never enter the running stats.
+        `None` -> the plain dense statistic (parity with the unpadded path).
+        """
         flat = x.reshape(-1)
         if self.inference or flat.shape[0] <= 1:
             return self
+        if mask is None:
+            batch_mean = flat.mean()
+            batch_var = flat.var(ddof=1)
+        else:
+            m = jnp.broadcast_to(mask, x.shape).reshape(-1).astype(flat.dtype)
+            n = jnp.maximum(m.sum(), 2.0)  # guard the ddof=1 / n-1 denominators
+            batch_mean = (flat * m).sum() / n
+            batch_var = (((flat - batch_mean) ** 2) * m).sum() / (n - 1.0)
         count = self.count + 1.0
         exponential_average_factor = (
             1.0 / count
         )  # momentum=None -> 1/num_batches_tracked (equal weight)
         new_mean = (
             1.0 - exponential_average_factor
-        ) * self.mean + exponential_average_factor * flat.mean()
+        ) * self.mean + exponential_average_factor * batch_mean
         new_var = (
             1.0 - exponential_average_factor
-        ) * self.std**2 + exponential_average_factor * flat.var(ddof=1)
+        ) * self.std**2 + exponential_average_factor * batch_var
         return ScalarNormalizer(
             mean=new_mean,
             std=jnp.sqrt(new_var),
@@ -177,7 +196,10 @@ class EnergyHead(eqx.Module):
         reference-subtracted target before the energy loss.
         """
         if self.atom_avg:
-            x = x / graph.n_node
+            # clamp >=1: empty padding graphs (n_node=0) are masked out of the loss,
+            # but x/0 -> inf would survive the mask as 0*inf=NaN. Identity for real
+            # graphs (parity preserved).
+            x = x / jnp.maximum(graph.n_node, 1)
         return self.normalizer(x)
 
     def absolute_energy(

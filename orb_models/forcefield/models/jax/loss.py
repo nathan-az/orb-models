@@ -28,12 +28,31 @@ def huber_loss(pred: jax.Array, target: jax.Array, delta: float | jax.Array) -> 
     return 0.5 * quad**2 + delta * lin
 
 
-def mean_error(pred: jax.Array, target: jax.Array, error_type: str) -> jax.Array:
-    """mae / mse / huber_<delta>, averaged over the last axis then the batch.
+def _masked_mean(per_row: jax.Array, mask: jax.Array | None) -> jax.Array:
+    """Mean over rows, dropping padding. `mask` (per-row bool) -> sum/count over the
+    real rows only; `None` -> plain mean (no padding, the legacy/single-graph path).
+
+    Padding rows MUST already be finite (no NaN/inf): `0 * NaN == NaN` would survive
+    the mask. The padding constructed by `pad_to_bucket`/`pad_targets` guarantees this.
+    """
+    if mask is None:
+        return per_row.mean()
+    mask = mask.astype(per_row.dtype)
+    return (per_row * mask).sum() / jnp.clip(mask.sum(), 1.0)
+
+
+def mean_error(
+    pred: jax.Array,
+    target: jax.Array,
+    error_type: str,
+    mask: jax.Array | None = None,
+) -> jax.Array:
+    """mae / mse / huber_<delta>, averaged over the last axis then the (real) batch.
 
     Mirrors graph_regressor.mean_error for the no-`batch_n_node` case (energy is
-    1-D, stress is (G,6) -> mean over 6 -> mean). The nested per-graph aggregation
-    is only used by the non-condhuber force path, which orb does not use.
+    1-D, stress is (G,6) -> mean over 6 -> mean). `mask` (per-row bool) excludes
+    padding rows from the batch average. The nested per-graph aggregation is only
+    used by the non-condhuber force path, which orb does not use.
     """
     if error_type.startswith("huber"):
         delta = float(error_type.split("_")[1])
@@ -47,15 +66,19 @@ def mean_error(pred: jax.Array, target: jax.Array, error_type: str) -> jax.Array
 
     if errors.ndim > 1:
         errors = errors.mean(axis=-1)
-    return errors.mean()
+    return _masked_mean(errors, mask)
 
 
 def conditional_huber_force_loss(
-    pred_forces: jax.Array, target_forces: jax.Array, huber_delta: float
+    pred_forces: jax.Array,
+    target_forces: jax.Array,
+    huber_delta: float,
+    mask: jax.Array | None = None,
 ) -> jax.Array:
     """MACE conditional Huber for forces. Per-row delta by target force magnitude.
 
     bands on ||target||: [0,100) [100,200) [200,300) [300, inf) -> delta * {1,.7,.4,.1}
+    `mask` (per-atom bool) excludes padding atoms from the per-atom average.
     """
     factors = jnp.asarray([huber_delta * x for x in (1.0, 0.7, 0.4, 0.1)])
     norm = jnp.linalg.norm(target_forces, axis=-1)  # (M,)
@@ -63,7 +86,8 @@ def conditional_huber_force_loss(
         jnp.where(norm < 100, 0, jnp.where(norm < 200, 1, jnp.where(norm < 300, 2, 3)))
     )
     delta = factors[band][:, None]  # (M, 1), broadcast over the 3 components
-    return huber_loss(pred_forces, target_forces, delta).mean()
+    per_atom = huber_loss(pred_forces, target_forces, delta).mean(axis=-1)  # (M,)
+    return _masked_mean(per_atom, mask)
 
 
 def forces_loss(
@@ -71,14 +95,18 @@ def forces_loss(
     raw_target: jax.Array,
     normalizer,
     loss_type: str = "condhuber_0.01",
+    mask: jax.Array | None = None,
 ) -> jax.Array:
-    """Normalize pred/target, then condhuber (or mae/mse/huber). fix_atoms=None only."""
+    """Normalize pred/target, then condhuber (or mae/mse/huber). fix_atoms=None only.
+
+    `mask` (per-atom bool) excludes padding atoms from the average.
+    """
     target = normalizer(raw_target)
     pred = normalizer(raw_pred)
     if loss_type.startswith("condhuber"):
         delta = float(loss_type.split("_")[1])
-        return conditional_huber_force_loss(pred, target, delta)
-    return mean_error(pred, target, loss_type)
+        return conditional_huber_force_loss(pred, target, delta, mask)
+    return mean_error(pred, target, loss_type, mask)
 
 
 def stress_loss(
@@ -86,13 +114,15 @@ def stress_loss(
     raw_target: jax.Array,
     normalizer,
     loss_type: str = "huber_0.01",
+    mask: jax.Array | None = None,
 ) -> jax.Array:
     """Normalize pred/target, then mean_error (huber by default).
 
     Both args must be in the SAME layout (Voigt-6); use `full_3x3_to_voigt_6` on a
     3x3 stress first, since torch computes the loss on Voigt-6 (6 components, not 9).
+    `mask` (per-graph bool) excludes padding graphs from the average.
     """
-    return mean_error(normalizer(raw_pred), normalizer(raw_target), loss_type)
+    return mean_error(normalizer(raw_pred), normalizer(raw_target), loss_type, mask)
 
 
 def full_3x3_to_voigt_6(stress: jax.Array) -> jax.Array:

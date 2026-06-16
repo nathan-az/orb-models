@@ -38,6 +38,8 @@ import jax.numpy as jnp
 from orb_models.common.atoms.jax.graph_batch import (
     JaxAtomGraphs,
     compute_differentiable_edge_vectors,
+    real_graph_mask,
+    real_node_mask,
 )
 from orb_models.common.models.jax.gns import MoleculeGNS
 from orb_models.forcefield.models.jax.forcefield_heads import ScalarNormalizer
@@ -91,26 +93,34 @@ def update_normalizer_buffers(
     """
     head = model.energy_head
     n_graphs = graph.n_node.shape[0]
+    # Masks drop padding rows so padded zeros never bias the running stats (all-True
+    # no-ops on an unpadded graph).
+    graph_mask = real_graph_mask(graph)  # (G,)
+    node_mask = real_node_mask(graph)  # (N,)
     reference = head.reference(
         graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
     )
     interaction_target = targets["energy"] - reference
     if head.atom_avg:
-        interaction_target = interaction_target / graph.n_node
+        # clamp >=1: empty padding graphs have n_node=0; without the clamp the inf
+        # they produce would reach the masked mean as 0*inf=NaN.
+        interaction_target = interaction_target / jnp.maximum(graph.n_node, 1)
 
     model = eqx.tree_at(
-        lambda m: m.energy_head.normalizer, model, head.normalizer.update(interaction_target)
+        lambda m: m.energy_head.normalizer,
+        model,
+        head.normalizer.update(interaction_target, graph_mask),
     )
     model = eqx.tree_at(
         lambda m: m.grad_forces_normalizer,
         model,
-        model.grad_forces_normalizer.update(targets["forces"]),
+        model.grad_forces_normalizer.update(targets["forces"], node_mask[:, None]),
     )
     if "stress" in targets:
         model = eqx.tree_at(
             lambda m: m.grad_stress_normalizer,
             model,
-            model.grad_stress_normalizer.update(targets["stress"]),
+            model.grad_stress_normalizer.update(targets["stress"], graph_mask[:, None]),
         )
     return model
 
@@ -272,8 +282,15 @@ def _total_loss(
     extra arg, NOT differentiated by the cotangent `jax.grad(argnums=(0,1,2,3))`.
 
     Targets: `energy` (G,) absolute, `forces` (N,3), `stress` (G,6) Voigt.
+
+    Padding: when `graph` was topped up by `pad_to_bucket`, the padding graph/atoms
+    must not enter the averages. `real_*_mask` drops them (a no-op all-True mask on
+    an unpadded graph), so a padded+masked loss equals summing the same systems
+    individually.
     """
     head = model.energy_head
+    graph_mask = real_graph_mask(graph)  # (G,) real graphs
+    node_mask = real_node_mask(graph)  # (N,) real atoms
 
     # Energy: huber on reference-subtracted, normalized interaction energy.
     reference = head.reference(
@@ -282,11 +299,12 @@ def _total_loss(
     interaction_target = targets["energy"] - reference
     e_pred = head.normalize_for_loss(energy, graph)
     e_target = head.normalize_for_loss(interaction_target, graph)
-    energy_l = weights["energy"] * mean_error(e_pred, e_target, head.loss_type)
+    energy_l = weights["energy"] * mean_error(e_pred, e_target, head.loss_type, graph_mask)
 
     # Forces = -dE/dpos: normalize then condhuber.
     forces_l = weights["forces"] * forces_loss(
-        -dE_dpos, targets["forces"], model.grad_forces_normalizer, model.forces_loss_type
+        -dE_dpos, targets["forces"], model.grad_forces_normalizer,
+        model.forces_loss_type, node_mask,
     )
 
     total = energy_l + forces_l
@@ -296,7 +314,8 @@ def _total_loss(
         volume = jnp.abs(jnp.linalg.det(graph.system_features["cell"]))  # (G,)
         stress = full_3x3_to_voigt_6(dE_ddisp / volume[:, None, None])  # (G,6)
         stress_l = weights["stress"] * stress_loss(
-            stress, targets["stress"], model.grad_stress_normalizer, head.loss_type
+            stress, targets["stress"], model.grad_stress_normalizer,
+            head.loss_type, graph_mask,
         )
         total = total + stress_l
         breakdown["stress"] = stress_l
@@ -314,11 +333,23 @@ def total_loss(
     weights: dict[str, float],
     *,
     has_stress: bool = True,
+    loss_model: ConservativeRegressor | None = None,
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
-    """`_total_loss` composed with the energy/grad forward pass."""
+    """`_total_loss` composed with the energy/grad forward pass.
+
+    The forward (`_energy_and_grads` -> `energy_fn`) uses `model`'s normalizers; the
+    loss NORMALIZATION (`_total_loss`) uses `loss_model`'s (defaults to `model`). They
+    differ ONLY in a live-normalizer train step: torch denormalizes the energy
+    *prediction* with the PRE-update stats (`model`) inside the forward, then advances
+    the stats and normalizes the loss with the POST-update stats (`loss_model`). With
+    frozen/identical normalizers (every parity test except the live one) `loss_model is
+    model`, so this is a no-op. Normalizers are non-trainable buffers, so `loss_model`
+    contributes no gradient -- only `model`'s weights do. See `train_step`.
+    """
+    loss_model = model if loss_model is None else loss_model
     energy, dE_dpos, dE_ddisp, dE_dgen = _energy_and_grads(graph, model)
     return _total_loss(
-        energy, dE_dpos, dE_ddisp, dE_dgen, graph, targets, weights, model, has_stress
+        energy, dE_dpos, dE_ddisp, dE_dgen, graph, targets, weights, loss_model, has_stress
     )
 
 
@@ -329,6 +360,7 @@ def compute_grads_reverse(
     weights: dict[str, float],
     *,
     has_stress: bool = True,
+    loss_model: ConservativeRegressor | None = None,
 ) -> tuple[ConservativeRegressor, dict[str, jax.Array]]:
     """Naive reverse-over-reverse: differentiate the loss directly.
 
@@ -337,9 +369,12 @@ def compute_grads_reverse(
     *through* that inner grad. JAX does nested differentiation natively -- no
     create_graph / retain_graph. Correct and simple; the reference the jvp path
     is benchmarked and cross-checked against.
+
+    `loss_model` (see `total_loss`) carries the POST-update normalizers for the loss
+    while `model` (differentiated) carries the PRE-update ones for the forward.
     """
     grads, breakdown = eqx.filter_grad(total_loss, has_aux=True)(
-        model, graph, targets, weights, has_stress=has_stress
+        model, graph, targets, weights, has_stress=has_stress, loss_model=loss_model
     )
     return grads, breakdown
 
@@ -351,6 +386,7 @@ def compute_grads_jvp(
     weights: dict[str, float],
     *,
     has_stress: bool = True,
+    loss_model: ConservativeRegressor | None = None,
 ) -> tuple[ConservativeRegressor, dict[str, jax.Array]]:
     """Forward-over-reverse: cotangents from `jax.grad`, one jvp through E.
 
@@ -362,7 +398,9 @@ def compute_grads_jvp(
     single directional derivative, computed in one forward-mode pass whose primal
     is the per-graph energy we reuse for the zeroth-order term.
     """
-    # 1. One reverse pass for the prediction VALUES the cotangents depend on.
+    # 1. One reverse pass for the prediction VALUES the cotangents depend on. The
+    #    forward uses `model` (PRE-update normalizers); the loss below uses `lm`.
+    lm = model if loss_model is None else loss_model
     energy, dE_dpos, dE_ddisp, dE_dgen = _energy_and_grads(graph, model)
 
     # 2. Cotangents in *raw-grad space*. jax.grad over `_total_loss` folds in the
@@ -372,7 +410,7 @@ def compute_grads_jvp(
     frozen = jax.tree.map(jax.lax.stop_gradient, (energy, dE_dpos, dE_ddisp, dE_dgen))
     (c_energy, c_pos, c_disp, c_gen), breakdown = jax.grad(
         _total_loss, argnums=(0, 1, 2, 3), has_aux=True
-    )(*frozen, graph, targets, weights, model, has_stress)
+    )(*frozen, graph, targets, weights, lm, has_stress)
 
     # 3. Single forward-mode pass. primal = per-graph energy (-> energy term),
     #    tangent (G,) = per-graph directional derivative; summing it gives
