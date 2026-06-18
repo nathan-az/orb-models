@@ -217,3 +217,74 @@ def make_train_step(
         )
 
     return step
+
+
+def make_accum_train_step(
+    optimizer: optax.GradientTransformation,
+    weights: dict[str, float],
+    *,
+    has_stress: bool = True,
+    grad_fn: GradFn = compute_grads_jvp,
+):
+    """Like `make_train_step` but accumulates grads over several micro-batches.
+
+    The fused `make_train_step` does grad+update in one jitted call; gradient
+    accumulation needs the two halves separated so several buckets contribute to
+    one optimiser update. This decomposes `train_step` accordingly:
+
+      * `_micro` (jitted): advance the normalizer buffers from this micro-batch,
+        take d(loss)/d(weights) on the buffer-updated model, and return the
+        *trainable-partition* grads (buffer grads dropped, as in `train_step`).
+        The returned model carries the advanced buffers, which chain into the next
+        micro-batch -- mirroring torch, where each forward advances BN stats once.
+      * `_apply` (jitted): one optimiser update from the summed grads.
+
+    The returned `step(model, opt_state, batches)` takes a list of
+    ``(graph, targets)`` (each padded to the SAME bucket shape, so `_micro`
+    compiles once) and returns ``(model, opt_state, breakdown)`` with grads
+    averaged over the micro-batches. With a one-element list it is equivalent to
+    `make_train_step` (one buffer advance, one update). Same `grad_fn` choice, so
+    accumulation works for both the jvp and reverse paths.
+    """
+
+    @eqx.filter_jit
+    def _micro(model, graph, targets):
+        spec = trainable_filter(model)
+        updated = update_normalizer_buffers(model, targets, graph)
+        grads, breakdown = grad_fn(
+            model, graph, targets, weights, has_stress=has_stress, loss_model=updated
+        )
+        grad_params, _ = eqx.partition(grads, spec)
+        return updated, grad_params, breakdown
+
+    @eqx.filter_jit
+    def _apply(model, opt_state, grad_params):
+        spec = trainable_filter(model)
+        params, static = eqx.partition(model, spec)
+        updates, opt_state = optimizer.update(grad_params, opt_state, params)
+        params = eqx.apply_updates(params, updates)
+        return eqx.combine(params, static), opt_state
+
+    def step(model, opt_state, batches):
+        acc_grads = None
+        acc_bd: dict | None = None
+        for graph, targets in batches:
+            model, grad_params, breakdown = _micro(model, graph, targets)
+            acc_grads = (
+                grad_params
+                if acc_grads is None
+                else jax.tree.map(jnp.add, acc_grads, grad_params)
+            )
+            acc_bd = (
+                dict(breakdown)
+                if acc_bd is None
+                else {k: acc_bd[k] + v for k, v in breakdown.items()}
+            )
+        n = len(batches)
+        if n > 1:
+            acc_grads = jax.tree.map(lambda g: g / n, acc_grads)
+            acc_bd = {k: v / n for k, v in acc_bd.items()}  # type: ignore[union-attr]
+        model, opt_state = _apply(model, opt_state, acc_grads)
+        return model, opt_state, acc_bd
+
+    return step
