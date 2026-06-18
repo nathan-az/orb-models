@@ -76,6 +76,25 @@ class ConservativeRegressor(eqx.Module):
     forces_loss_type: str = eqx.field(static=True, default="condhuber_0.01")
 
 
+def _interaction_target(
+    raw_target: jax.Array, reference: jax.Array
+) -> jax.Array:
+    """`target - reference` done in fp64, then downcast to the target dtype.
+
+    Matches torch `EnergyHead.loss`:
+        `(raw_target.double() - reference.double()).to(interaction_pred.dtype)`.
+    Both operands are OMol-scale (~1e5 eV) and nearly equal; their difference (the
+    small interaction energy the loss actually fits) suffers catastrophic
+    cancellation in fp32. Subtracting in fp64 preserves it, and the small result is
+    safe to carry back in single precision. A no-op unless `jax_enable_x64` is set --
+    without it `astype(float64)` silently stays fp32 (the opt-out), so the running
+    stats and loss simply match the old single-precision behaviour.
+    """
+    return (
+        raw_target.astype(jnp.float64) - reference.astype(jnp.float64)
+    ).astype(raw_target.dtype)
+
+
 def update_normalizer_buffers(
     model: ConservativeRegressor,
     targets: dict[str, jax.Array],
@@ -100,7 +119,7 @@ def update_normalizer_buffers(
     reference = head.reference(
         graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
     )
-    interaction_target = targets["energy"] - reference
+    interaction_target = _interaction_target(targets["energy"], reference)
     if head.atom_avg:
         # clamp >=1: empty padding graphs have n_node=0; without the clamp the inf
         # they produce would reach the masked mean as 0*inf=NaN.
@@ -296,7 +315,7 @@ def _total_loss(
     reference = head.reference(
         graph.node_features["atomic_numbers"], graph.per_node_graph_index, graph.n_node.shape[0]
     )
-    interaction_target = targets["energy"] - reference
+    interaction_target = _interaction_target(targets["energy"], reference)
     e_pred = head.normalize_for_loss(energy, graph)
     e_target = head.normalize_for_loss(interaction_target, graph)
     energy_l = weights["energy"] * mean_error(e_pred, e_target, head.loss_type, graph_mask)

@@ -203,13 +203,23 @@ class EnergyHead(eqx.Module):
         return self.normalizer(x)
 
     def absolute_energy(
-        self, interaction_energy: jax.Array, graph
+        self, interaction_energy: jax.Array, graph, *, fp64: bool = True
     ) -> jax.Array:
-        """interaction energy + fixed reference. Constant w.r.t. positions/params."""
+        """interaction energy + fixed reference. Constant w.r.t. positions/params.
+
+        When reference energies are OMol-scale (~1e4-1e5 eV), the fp32 step size at
+        that magnitude (~0.01-0.04 eV) destroys kJ/mol resolution, so `fp64=True`
+        (the default, matching torch `EnergyHead.absolute_energy`) upcasts the final
+        sum. NOTE: this is a no-op unless `jax_enable_x64` is set -- without it JAX
+        silently keeps fp32, which is exactly the opt-out. `fp64=False` reproduces the
+        old single-precision behaviour regardless of the x64 config.
+        """
         n_graphs = graph.n_node.shape[0]
         ref = self.reference(
             graph.node_features["atomic_numbers"],
             graph.per_node_graph_index,
             n_graphs,
         )
-        return interaction_energy + ref
+        if fp64:
+            return interaction_energy.astype(jnp.float64) + ref.astype(jnp.float64)
+        return interaction_energy + ref.astype(interaction_energy.dtype)
