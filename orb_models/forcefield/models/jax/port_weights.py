@@ -160,10 +160,25 @@ def copy_energy_head(jax_head, torch_head):
 
 
 def copy_scalar_normalizer(jax_norm, torch_norm):
-    """Share a ScalarNormalizer's fixed mean/std buffers."""
+    """Share a ScalarNormalizer's running mean/std AND batch count.
+
+    The count matters for finetuning, not just inference: the online `update` uses
+    BatchNorm's momentum=None cumulative average, factor = 1 / count. torch's
+    `num_batches_tracked` is huge for a pretrained checkpoint (~2e6), so its factor
+    is ~5e-7 and one finetuning mini-batch barely perturbs the calibrated stats.
+    If we left the jax count at 0, the FIRST update would use factor = 1/1 = 1.0 and
+    overwrite the pretrained mean/std wholesale with a single mini-batch -- which
+    destabilises training (NaNs within a step or two). Copy it so the jax online
+    update tracks torch's.
+    """
     jax_norm = eqx.tree_at(lambda m: m.mean, jax_norm, to_jax(torch_norm.bn.running_mean))
     jax_norm = eqx.tree_at(
         lambda m: m.std, jax_norm, to_jax(torch.sqrt(torch_norm.bn.running_var))
+    )
+    jax_norm = eqx.tree_at(
+        lambda m: m.count,
+        jax_norm,
+        to_jax(torch_norm.bn.num_batches_tracked).astype(jax_norm.count.dtype),
     )
     return jax_norm
 

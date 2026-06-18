@@ -264,6 +264,26 @@ def pad_targets(
     return out
 
 
+def extract_targets(
+    graph: "AtomGraphs", *, has_stress: bool = True
+) -> dict[str, jax.Array]:
+    """Pull energy/forces/stress off a torch `AtomGraphs` batch into a JAX dict.
+
+    Keys match the loss/`property_definitions` fullnames. Per `_total_loss`: energy
+    is ``(G,)`` absolute, forces ``(N, 3)``, stress ``(G, 6)`` Voigt. The graph
+    adapter stores per-graph targets with a trailing dim, so energy/stress are
+    reshaped. Apply this BEFORE `to_jax`/`pad_to_bucket`'s torch forward mutates the
+    batch, then `pad_targets` to top the result up to the bucket shape.
+    """
+    targets = {
+        "energy": torch_to_jax(graph.system_targets["energy"]).reshape(-1),  # (G,)
+        "forces": torch_to_jax(graph.node_targets["forces"]),  # (N, 3)
+    }
+    if has_stress:
+        targets["stress"] = torch_to_jax(graph.system_targets["stress"]).reshape(-1, 6)
+    return targets
+
+
 def compute_differentiable_edge_vectors(
     positions: jax.Array,  # (N, 3)  DIFFERENTIATE w.r.t. this -> forces
     unit_shifts: jax.Array,  # (E, 3)  integer image offsets per edge (static)
