@@ -327,7 +327,7 @@ def _total_loss(
     )
 
     total = energy_l + forces_l
-    breakdown = {"energy": energy_l, "forces": forces_l}
+    metrics = {"energy": energy_l, "forces": forces_l}
 
     if has_stress:
         volume = jnp.abs(jnp.linalg.det(graph.system_features["cell"]))  # (G,)
@@ -337,12 +337,12 @@ def _total_loss(
             head.loss_type, graph_mask,
         )
         total = total + stress_l
-        breakdown["stress"] = stress_l
+        metrics["stress"] = stress_l
 
     # An equigrad / rotational_grad regulariser would consume `dE_dgen` here; absent,
     # jax.grad gives a zero `dE_dgen` cotangent and the generator tangent is a no-op.
-    breakdown["total"] = total
-    return total, breakdown
+    metrics["total"] = total
+    return total, metrics
 
 
 def total_loss(
