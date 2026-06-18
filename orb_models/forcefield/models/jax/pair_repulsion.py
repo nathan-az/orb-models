@@ -86,5 +86,10 @@ class ZBLBasis(eqx.Module):
         n_graphs = graph.n_node.shape[0]
         energy = jax.ops.segment_sum(v_nodes, graph.per_node_graph_index, n_graphs)  # (G,)
         if self.node_aggregation == "mean":
-            energy = energy / graph.n_node
+            # clamp >=1 so empty padding graphs (n_node=0) give 0/1=0, not 0/0=NaN.
+            # Empty graphs carry no nodes/edges, so the numerator is exactly 0 and
+            # real graphs (n_node>=1) are untouched -- mirrors forcefield_heads
+            # aggregate_nodes. Without this the NaN on padding graphs survives the
+            # loss mask but poisons the summed-energy gradient (forces/params).
+            energy = energy / jnp.maximum(graph.n_node, 1)
         return energy
