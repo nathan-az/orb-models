@@ -28,6 +28,8 @@ from torch import nn
 # loading can reuse them); re-exported through `helpers` for the equivalence tests.
 from orb_models.forcefield.models.jax.port_weights import (
     copy_attention_network,
+    copy_charge_spin_conditioner,
+    copy_charge_spin_embedding,
     copy_conservative_regressor,
     copy_decoder,
     copy_encoder,
@@ -86,6 +88,8 @@ def helpers():
         copy_attention_network=copy_attention_network,
         copy_decoder=copy_decoder,
         copy_molecule_gns=copy_molecule_gns,
+        copy_charge_spin_embedding=copy_charge_spin_embedding,
+        copy_charge_spin_conditioner=copy_charge_spin_conditioner,
         copy_energy_head=copy_energy_head,
         copy_scalar_normalizer=copy_scalar_normalizer,
         copy_conservative_regressor=copy_conservative_regressor,

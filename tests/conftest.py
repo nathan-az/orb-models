@@ -6,6 +6,35 @@ import torch
 from orb_models.common import utils
 
 
+def pytest_addoption(parser):
+    """Add `--run-integration` to opt into slow/heavyweight tests (real-scale
+    architectures and tests that download released checkpoints), which are skipped
+    by default so the unit suite stays fast and offline."""
+    parser.addoption(
+        "--run-integration",
+        action="store_true",
+        default=False,
+        help="run integration tests (real-scale models, checkpoint downloads)",
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "integration: slow/heavyweight test (real-scale model or checkpoint "
+        "download); only runs with --run-integration",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--run-integration"):
+        return
+    skip = pytest.mark.skip(reason="needs --run-integration")
+    for item in items:
+        if "integration" in item.keywords:
+            item.add_marker(skip)
+
+
 @pytest.fixture(autouse=True, scope="function")
 def default_test_setup():
     """

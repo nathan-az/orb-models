@@ -25,6 +25,7 @@ from torch import nn
 import jax.numpy as jnp
 
 from orb_models.common.models.jax.angular import SphericalHarmonics
+from orb_models.common.models.jax.conditioner import ChargeSpinConditioner
 from orb_models.common.models.jax.gns import MoleculeGNS
 from orb_models.common.models.jax.rbf import BesselBasis
 from orb_models.forcefield.models.jax.conservative_regressor import ConservativeRegressor
@@ -113,6 +114,35 @@ def copy_decoder(jax_dec, torch_dec):
     return eqx.tree_at(lambda m: m.mlp, jax_dec, copy_mlp(jax_dec.mlp, torch_dec.node_fn.mlp))
 
 
+def copy_charge_spin_embedding(jax_emb, torch_emb):
+    """Copy a single ChargeSpinEmbedding (charge or spin) across frameworks."""
+    etype = torch_emb.embedding_type
+    if etype in ("sin_emb", "pos_emb"):
+        return eqx.tree_at(lambda m: m.W, jax_emb, to_jax(torch_emb.W))
+    if etype == "lin_emb":
+        return eqx.tree_at(lambda m: m.lin_emb, jax_emb, copy_linear(jax_emb.lin_emb, torch_emb.lin_emb))
+    if etype == "rand_emb":
+        return eqx.tree_at(
+            lambda m: m.rand_emb.weight, jax_emb, to_jax(torch_emb.rand_emb.weight)
+        )
+    raise ValueError(f"Unsupported embedding type: {etype}")
+
+
+def copy_charge_spin_conditioner(jax_cond, torch_cond):
+    """Copy a ChargeSpinConditioner (its charge + spin embeddings) across frameworks."""
+    jax_cond = eqx.tree_at(
+        lambda m: m.charge_embedding,
+        jax_cond,
+        copy_charge_spin_embedding(jax_cond.charge_embedding, torch_cond.charge_embedding),
+    )
+    jax_cond = eqx.tree_at(
+        lambda m: m.spin_embedding,
+        jax_cond,
+        copy_charge_spin_embedding(jax_cond.spin_embedding, torch_cond.spin_embedding),
+    )
+    return jax_cond
+
+
 def copy_molecule_gns(jax_model, torch_model):
     """Share every weight of a torch MoleculeGNS into its jax counterpart.
 
@@ -137,6 +167,12 @@ def copy_molecule_gns(jax_model, torch_model):
     jax_model = eqx.tree_at(
         lambda m: m._decoder, jax_model, copy_decoder(jax_model._decoder, torch_model._decoder)
     )
+    if jax_model.conditioner is not None:
+        jax_model = eqx.tree_at(
+            lambda m: m.conditioner,
+            jax_model,
+            copy_charge_spin_conditioner(jax_model.conditioner, torch_model.conditioner),
+        )
     return jax_model
 
 
@@ -222,17 +258,26 @@ def build_orb_v3_conservative_jax(
     num_message_passing_steps: int = 5,
     activation: str = "silu",
     zbl_node_aggregation: str = "sum",
+    has_charge_spin_cond: bool = False,
 ) -> ConservativeRegressor:
     """A jax `ConservativeRegressor` with the orb-v3 conservative (omat/mpa) arch.
 
     Matches `pretrained.orb_v3_conservative_architecture` for the released
-    conservative checkpoints: no charge/spin conditioner, no electrostatics, no
-    confidence head (none of which affect energy/forces/stress).
+    conservative checkpoints: no electrostatics, no confidence head (neither
+    affects energy/forces/stress).
+
+    `has_charge_spin_cond=True` adds the system-level charge/spin conditioner used
+    by the OrbMol-v1 (omol) checkpoints: a `ChargeSpinConditioner` with sin
+    embeddings, conditioning the backbone additively on node features. This *does*
+    affect energy/forces, so it must match the torch model.
 
     `zbl_node_aggregation` must match the torch model: the released omat/mpa
     checkpoints are loaded with "mean" (a backward-compat quirk in pretrained.py),
     not the "sum" used by new code.
     """
+    conditioner = (
+        ChargeSpinConditioner(latent_dim, key=key) if has_charge_spin_cond else None
+    )
     gns = MoleculeGNS(
         latent_dim=latent_dim,
         num_message_passing_steps=num_message_passing_steps,
@@ -245,6 +290,8 @@ def build_orb_v3_conservative_jax(
         interaction_params={"distance_cutoff": True, "attention_gate": "sigmoid"},
         node_feature_names=["feat"],
         edge_feature_names=["feat"],
+        conditioner=conditioner,
+        conditioning_type="additive",
         activation=activation,
         mlp_norm="rms_norm",
         key=key,
@@ -264,22 +311,71 @@ def build_orb_v3_conservative_jax(
     )
 
 
+_TORCH_ACTIVATION_NAMES = {
+    "SiLU": "silu",
+    "GELU": "gelu",
+    "Softplus": "ssp",
+    "SSP": "ssp",
+}
+
+
+def _linears(seq) -> list:
+    return [m for m in seq if isinstance(m, nn.Linear)]
+
+
+def _infer_activation(mlp_seq) -> str:
+    """Read the activation name off the first non-linear, non-identity module of an
+    `MLP` Sequential. Released orb-v3 models use silu."""
+    for m in mlp_seq:
+        name = type(m).__name__
+        if name in _TORCH_ACTIVATION_NAMES:
+            return _TORCH_ACTIVATION_NAMES[name]
+    raise ValueError(
+        "Could not infer activation from torch MLP; expected one of "
+        f"{sorted(_TORCH_ACTIVATION_NAMES)}."
+    )
+
+
 def load_orb_v3_conservative_into_jax(torch_model, *, key) -> ConservativeRegressor:
     """Build the jax arch matching a torch `orb_v3_conservative_architecture` model
     and copy its weights across. `torch_model` should already have checkpoint
     weights loaded (e.g. via `pretrained.orb_v3_conservative_inf_omat`).
 
+    All shape-bearing hyperparameters (latent_dim, base/head MLP hidden dims and
+    depths, message-passing steps, activation, whether a charge/spin conditioner is
+    present) are *inferred* from the torch model, so non-default architectures load
+    correctly rather than silently tripping a Linear-count assertion. The fixed
+    orb-v3 conservative feature config (Bessel/SH edges, outer-product+cutoff,
+    sigmoid distance-cutoff attention, rms_norm) is assumed.
+
     ZBL aggregation is read off the torch model so the omat/mpa "mean" quirk is
     honoured automatically.
+
+    An `MLP` Sequential built with `num_mlp_layers=d` has `d + 1` Linear layers
+    (in->hidden, (d-1) x hidden->hidden, hidden->out), so `depth = len(linears) - 1`.
     """
-    # torch MoleculeGNS doesn't expose latent_dim; read it off the energy head's
-    # first Linear (in_features == latent_dim).
-    head_linears = [m for m in torch_model.heads["energy"].mlp if isinstance(m, nn.Linear)]
-    latent_dim = head_linears[0].in_features
+    gns = torch_model.model
+    # Backbone (encoder) MLP: in == latent (+ extra=0), out == latent.
+    enc_mlp = gns._encoder._node_fn.mlp
+    enc_linears = _linears(enc_mlp)
+    latent_dim = enc_linears[-1].out_features
+    base_mlp_hidden_dim = enc_linears[0].out_features
+    base_mlp_depth = len(enc_linears) - 1
+
+    head_linears = _linears(torch_model.heads["energy"].mlp)
+    head_mlp_hidden_dim = head_linears[0].out_features
+    head_mlp_depth = len(head_linears) - 1
+
     jax_model = build_orb_v3_conservative_jax(
         key=key,
         latent_dim=latent_dim,
-        num_message_passing_steps=len(torch_model.model.gnn_stacks),
+        base_mlp_hidden_dim=base_mlp_hidden_dim,
+        base_mlp_depth=base_mlp_depth,
+        head_mlp_hidden_dim=head_mlp_hidden_dim,
+        head_mlp_depth=head_mlp_depth,
+        num_message_passing_steps=len(gns.gnn_stacks),
+        activation=_infer_activation(enc_mlp),
         zbl_node_aggregation=torch_model.pair_repulsion_fn.node_aggregation,
+        has_charge_spin_cond=gns.conditioner is not None,
     )
     return copy_conservative_regressor(jax_model, torch_model)
