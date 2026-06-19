@@ -24,9 +24,6 @@ class AtomEmbedding(eqx.Module):
         key: jax.Array | None,
     ):
         self.embed_size = emb_size
-        # No explicit dtype: jax.random.uniform / jnp.zeros follow the default
-        # floating dtype (float32, or float64 under jax_enable_x64), matching
-        # eqx.nn.Linear/LayerNorm so the embedding never mismatches the encoder.
         shape = (num_elements + 1, emb_size)
         if key is not None:
             # init by uniform distribution, matching torch nn.init.uniform_(-sqrt(3), sqrt(3))

@@ -398,9 +398,7 @@ class MoleculeGNS(eqx.Module):
 
         nodes, edges = self._encoder(node_features, edge_features)
 
-        cutoff = get_cutoff_p4(
-            jnp.linalg.norm(batch.edge_features["vectors"], axis=-1)
-        )
+        cutoff = get_cutoff_p4(jnp.linalg.norm(batch.edge_features["vectors"], axis=-1))
         for gnn in self.gnn_stacks:
             nodes, edges = gnn(
                 nodes,

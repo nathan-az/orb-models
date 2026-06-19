@@ -79,20 +79,13 @@ class ConservativeRegressor(eqx.Module):
 def _interaction_target(
     raw_target: jax.Array, reference: jax.Array
 ) -> jax.Array:
-    """`target - reference` done in fp64, then downcast to the target dtype.
+    """`target - reference`, the small interaction energy the loss fits.
 
-    Matches torch `EnergyHead.loss`:
-        `(raw_target.double() - reference.double()).to(interaction_pred.dtype)`.
-    Both operands are OMol-scale (~1e5 eV) and nearly equal; their difference (the
-    small interaction energy the loss actually fits) suffers catastrophic
-    cancellation in fp32. Subtracting in fp64 preserves it, and the small result is
-    safe to carry back in single precision. A no-op unless `jax_enable_x64` is set --
-    without it `astype(float64)` silently stays fp32 (the opt-out), so the running
-    stats and loss simply match the old single-precision behaviour.
+    Mirrors torch `EnergyHead.loss` (minus its fp64 upcast). Both operands are
+    OMol-scale (~1e5 eV) and nearly equal, so the fp32 difference loses precision to
+    catastrophic cancellation -- an accepted tradeoff now the model is fp32-only.
     """
-    return (
-        raw_target.astype(jnp.float64) - reference.astype(jnp.float64)
-    ).astype(raw_target.dtype)
+    return raw_target - reference
 
 
 def update_normalizer_buffers(

@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
+import numpy as np
 
 import jax
 import jax.numpy as jnp
@@ -282,6 +283,102 @@ def extract_targets(
     if has_stress:
         targets["stress"] = torch_to_jax(graph.system_targets["stress"]).reshape(-1, 6)
     return targets
+
+
+# --- host-side (numpy) padded prep -------------------------------------------
+# `to_jax` + `pad_to_bucket` + `extract_targets` + `pad_targets` done in numpy.
+# Equivalent result, but built on the host with np.pad/np.concatenate instead of
+# eager `jnp` ops, then handed to the model via a single `jax.device_put`. The jnp
+# path dispatches ~20 tiny XLA ops per batch whose eager compile-cache misses on
+# the varying real shape -- ~300ms/batch. numpy is ~3ms and parallelises across
+# DataLoader workers (where there is no device anyway). See training/profile_prep.py.
+
+
+def _np_pad_axis0(x: np.ndarray, target: int, fill=0) -> np.ndarray:
+    """np.pad along axis 0 up to `target` rows (numpy mirror of `_pad_axis0`)."""
+    pad = target - x.shape[0]
+    if pad == 0:
+        return x
+    widths = [(0, pad)] + [(0, 0)] * (x.ndim - 1)
+    return np.pad(x, widths, constant_values=fill)
+
+
+def to_padded_numpy(
+    graph: "AtomGraphs", n_pad: int, e_pad: int, g_pad: int, *, has_stress: bool
+) -> tuple[JaxAtomGraphs, dict[str, np.ndarray]]:
+    """Build the fixed-bucket padded ``(JaxAtomGraphs, targets)`` entirely in numpy.
+
+    Mirrors ``extract_targets`` + ``to_jax`` + ``pad_to_bucket`` + ``pad_targets``
+    exactly (same autodiff-safe padding: self-loop padding edges, ``[1,0,0]`` shifts,
+    identity padding cells), but every leaf is a host ``np.ndarray``. Intended as a
+    DataLoader ``collate_fn`` step so the cost runs in worker processes; the train
+    loop then does one ``jax.device_put`` to land the whole pytree on device.
+    """
+    npf = lambda t: t.detach().cpu().numpy()
+    # Targets first (read-only, before anything touches the torch batch).
+    targets = {
+        "energy": npf(graph.system_targets["energy"]).reshape(-1),
+        "forces": npf(graph.node_targets["forces"]),
+    }
+    if has_stress:
+        targets["stress"] = npf(graph.system_targets["stress"]).reshape(-1, 6)
+
+    n = graph.node_batch_index.shape[0]
+    e = graph.senders.shape[0]
+    g = graph.n_node.shape[0]
+    if n_pad < n or e_pad < e or g_pad < g + 1:
+        raise ValueError(
+            f"bucket ({n_pad},{e_pad},{g_pad}) too small for packed batch "
+            f"({n},{e},{g}); need n_pad>=n, e_pad>=e, g_pad>=n_graphs+1."
+        )
+
+    # Connectivity: padding atoms/edges point at the absorbing graph (slot g);
+    # padding edges are self-loops on the first padding atom (index n).
+    node_idx = _np_pad_axis0(npf(graph.node_batch_index), n_pad, fill=g)
+    edge_idx = _np_pad_axis0(npf(graph._get_per_edge_graph_indices()), e_pad, fill=g)
+    senders = _np_pad_axis0(npf(graph.senders), e_pad, fill=n)
+    receivers = _np_pad_axis0(npf(graph.receivers), e_pad, fill=n)
+
+    n_node = _np_pad_axis0(npf(graph.n_node), g_pad)
+    n_node[g] = n_pad - n
+    n_edge = _np_pad_axis0(npf(graph.n_edge), g_pad)
+    n_edge[g] = e_pad - e
+
+    node_features = {k: _np_pad_axis0(npf(v), n_pad) for k, v in graph.node_features.items()}
+    edge_features = {}
+    for k, v in graph.edge_features.items():
+        fill = 1 if k == "unit_shifts" else 0  # nonzero shift -> nonzero vectors
+        a = _np_pad_axis0(npf(v), e_pad, fill=fill)
+        if k == "unit_shifts":
+            a[e:, 1:] = 0  # exactly [1,0,0] per padding edge
+        edge_features[k] = a
+    system_features = {}
+    for k, v in graph.system_features.items():
+        a = npf(v)
+        if k == "cell":  # identity cell on padding graphs -> finite unit volume
+            eye = np.broadcast_to(np.eye(3, dtype=a.dtype), (g_pad - g, 3, 3))
+            system_features[k] = np.concatenate([a, eye], axis=0)
+        else:
+            system_features[k] = _np_pad_axis0(a, g_pad)
+
+    padded_graph = JaxAtomGraphs(
+        senders=senders,
+        receivers=receivers,
+        n_node=n_node,
+        n_edge=n_edge,
+        node_features=node_features,
+        edge_features=edge_features,
+        system_features=system_features,
+        per_node_graph_index=node_idx,
+        per_edge_graph_index=edge_idx,
+        radius=graph.radius,
+        n_real_graph=np.int32(g),
+    )
+    padded_targets = {
+        k: _np_pad_axis0(v, n_pad if k == "forces" else g_pad)
+        for k, v in targets.items()
+    }
+    return padded_graph, padded_targets
 
 
 def compute_differentiable_edge_vectors(

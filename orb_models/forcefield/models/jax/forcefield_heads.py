@@ -202,17 +202,14 @@ class EnergyHead(eqx.Module):
             x = x / jnp.maximum(graph.n_node, 1)
         return self.normalizer(x)
 
-    def absolute_energy(
-        self, interaction_energy: jax.Array, graph, *, fp64: bool = True
-    ) -> jax.Array:
+    def absolute_energy(self, interaction_energy: jax.Array, graph) -> jax.Array:
         """interaction energy + fixed reference. Constant w.r.t. positions/params.
 
-        When reference energies are OMol-scale (~1e4-1e5 eV), the fp32 step size at
-        that magnitude (~0.01-0.04 eV) destroys kJ/mol resolution, so `fp64=True`
-        (the default, matching torch `EnergyHead.absolute_energy`) upcasts the final
-        sum. NOTE: this is a no-op unless `jax_enable_x64` is set -- without it JAX
-        silently keeps fp32, which is exactly the opt-out. `fp64=False` reproduces the
-        old single-precision behaviour regardless of the x64 config.
+        Runs in fp32 (the model's only precision). Reference energies at OMol scale
+        (~1e4-1e5 eV) lose kJ/mol resolution to the fp32 step size at that magnitude;
+        the energy *loss* avoids this by working on the reference-subtracted target
+        (see `interaction_reference` in the regressor), so the absolute sum here is
+        used for reporting, not the gradient.
         """
         n_graphs = graph.n_node.shape[0]
         ref = self.reference(
@@ -220,6 +217,4 @@ class EnergyHead(eqx.Module):
             graph.per_node_graph_index,
             n_graphs,
         )
-        if fp64:
-            return interaction_energy.astype(jnp.float64) + ref.astype(jnp.float64)
         return interaction_energy + ref.astype(interaction_energy.dtype)

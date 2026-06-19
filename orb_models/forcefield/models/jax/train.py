@@ -57,14 +57,21 @@ def _onecycle_cos_schedule(
     """
     step0_end = pct_start * total_steps - 1.0
     phase1_len = (total_steps - 1) - step0_end
+    # Guard the phase denominators: at `total_steps == 1/pct_start` (e.g. 20 with the
+    # default 0.05) `step0_end` is exactly 0, so `step/step0_end` is 0/0 = NaN
+    warm_denom = step0_end if step0_end > 0.0 else 1.0
+    anneal_denom = phase1_len if phase1_len > 0.0 else 1.0
 
     def cos(a, b, p):
         return b + (a - b) / 2.0 * (jnp.cos(jnp.pi * p) + 1.0)
 
     def schedule(step):
-        step = step.astype(jnp.float64) if hasattr(step, "astype") else float(step)
-        warm = cos(initial, peak, step / step0_end)
-        anneal = cos(peak, final, (step - step0_end) / phase1_len)
+        # int count -> float at the ambient precision (fp32 in training; the fp64
+        # equivalence tests run under jax_enable_x64 and need the schedule in fp64
+        # to match torch's OneCycleLR to tolerance).
+        step = step * 1.0 if hasattr(step, "astype") else float(step)
+        warm = cos(initial, peak, step / warm_denom)
+        anneal = cos(peak, final, (step - step0_end) / anneal_denom)
         return jnp.where(step <= step0_end, warm, anneal)
 
     return schedule
