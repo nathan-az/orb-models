@@ -29,7 +29,12 @@ from orb_models.common.models.jax.conditioner import ChargeSpinConditioner
 from orb_models.common.models.jax.gns import MoleculeGNS
 from orb_models.common.models.jax.rbf import BesselBasis
 from orb_models.forcefield.models.jax.conservative_regressor import ConservativeRegressor
-from orb_models.forcefield.models.jax.forcefield_heads import EnergyHead
+from orb_models.forcefield.models.jax.coulomb_module import CoulombModule
+from orb_models.forcefield.models.jax.forcefield_heads import (
+    ChargeConditionedEnergyHead,
+    EnergyHead,
+    LatentChargeHead,
+)
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
 
 
@@ -195,6 +200,17 @@ def copy_energy_head(jax_head, torch_head):
     return jax_head
 
 
+def copy_charge_conditioned_energy_head(jax_head, torch_head):
+    """Share a ChargeConditionedEnergyHead -- identical layout to EnergyHead
+    (MLP + normalizer + reference), only the MLP input width differs."""
+    return copy_energy_head(jax_head, torch_head)
+
+
+def copy_latent_charge_head(jax_head, torch_head):
+    """Share a LatentChargeHead / LatentSpinHead -- a single MLP, no buffers."""
+    return eqx.tree_at(lambda m: m.mlp, jax_head, copy_mlp(jax_head.mlp, torch_head.mlp))
+
+
 def copy_scalar_normalizer(jax_norm, torch_norm):
     """Share a ScalarNormalizer's running mean/std AND batch count.
 
@@ -243,6 +259,24 @@ def copy_conservative_regressor(jax_model, torch_model):
         jax_model,
         copy_scalar_normalizer(jax_model.grad_stress_normalizer, torch_model.grad_stress_normalizer),
     )
+    # OrbMol-v2 electrostatics heads (no-ops when absent on both sides). The
+    # CoulombModule holds only the fixed `coulomb_constant`, so nothing to copy.
+    if jax_model.latent_charge_head is not None:
+        jax_model = eqx.tree_at(
+            lambda m: m.latent_charge_head,
+            jax_model,
+            copy_latent_charge_head(
+                jax_model.latent_charge_head, torch_model.heads["latent_charges"]
+            ),
+        )
+    if jax_model.latent_spin_head is not None:
+        jax_model = eqx.tree_at(
+            lambda m: m.latent_spin_head,
+            jax_model,
+            copy_latent_charge_head(
+                jax_model.latent_spin_head, torch_model.heads["latent_spins"]
+            ),
+        )
     return jax_model
 
 
@@ -308,6 +342,61 @@ def build_orb_v3_conservative_jax(
         gns=gns,
         energy_head=energy_head,
         pair_repulsion=ZBLBasis(p=6, node_aggregation=zbl_node_aggregation),
+    )
+
+
+def build_orbmol_v2_jax(
+    *,
+    key,
+    latent_dim: int = 256,
+    base_mlp_hidden_dim: int = 1024,
+    base_mlp_depth: int = 2,
+    head_mlp_hidden_dim: int = 256,
+    head_mlp_depth: int = 1,
+    num_message_passing_steps: int = 5,
+    activation: str = "silu",
+) -> ConservativeRegressor:
+    """A jax OrbMol-v2 `ConservativeRegressor` (electrostatics) at released dims.
+
+    Mirrors `pretrained.orb_v3_conservative_architecture(has_electrostatics=True)`:
+    the orb-v3 backbone + system charge/spin conditioner, with the energy head
+    replaced by `ChargeConditionedEnergyHead`, a `LatentChargeHead` (charges feed the
+    head AND the Coulomb sum), and a `CoulombModule`. The periodic branch needs a
+    `pme_prep` attached to the graph (see `jax/pme.py`); without it the module runs
+    the non-periodic direct sum. Weights are random -- use for benchmarking /
+    structure, not parity.
+    """
+    gns = MoleculeGNS(
+        latent_dim=latent_dim,
+        num_message_passing_steps=num_message_passing_steps,
+        num_mlp_layers=base_mlp_depth,
+        mlp_hidden_dim=base_mlp_hidden_dim,
+        rbf_transform=BesselBasis(r_max=6.0, num_bases=8),
+        angular_transform=SphericalHarmonics(lmax=3, normalize=True, normalization="component"),
+        outer_product_with_cutoff=True,
+        use_embedding=True,
+        interaction_params={"distance_cutoff": True, "attention_gate": "sigmoid"},
+        node_feature_names=["feat"],
+        edge_feature_names=["feat"],
+        conditioner=ChargeSpinConditioner(latent_dim, key=key),
+        conditioning_type="additive",
+        activation=activation,
+        mlp_norm="rms_norm",
+        key=key,
+    )
+    return ConservativeRegressor(
+        gns=gns,
+        energy_head=ChargeConditionedEnergyHead(
+            latent_dim=latent_dim, num_mlp_layers=head_mlp_depth,
+            mlp_hidden_dim=head_mlp_hidden_dim, use_spins=False,
+            activation=activation, key=key,
+        ),
+        pair_repulsion=ZBLBasis(p=6, node_aggregation="sum"),
+        latent_charge_head=LatentChargeHead(
+            latent_dim=latent_dim, num_mlp_layers=2, mlp_hidden_dim=128,
+            enforce_total_charge=True, activation=activation, key=key,
+        ),
+        coulomb_module=CoulombModule(),
     )
 
 

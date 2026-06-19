@@ -37,12 +37,17 @@ import jax.numpy as jnp
 
 from orb_models.common.atoms.jax.graph_batch import (
     JaxAtomGraphs,
+    apply_stress_displacement,
     compute_differentiable_edge_vectors,
     real_graph_mask,
     real_node_mask,
+    rotation_from_generator,
 )
 from orb_models.common.models.jax.gns import MoleculeGNS
-from orb_models.forcefield.models.jax.forcefield_heads import ScalarNormalizer
+from orb_models.forcefield.models.jax.forcefield_heads import (
+    ChargeConditionedEnergyHead,
+    ScalarNormalizer,
+)
 from orb_models.forcefield.models.jax.loss import (
     forces_loss,
     full_3x3_to_voigt_6,
@@ -64,6 +69,13 @@ class ConservativeRegressor(eqx.Module):
     gns: MoleculeGNS
     energy_head: eqx.Module
     pair_repulsion: eqx.Module | None = None
+    # OrbMol-v2 electrostatics (None for the v1/conservative configs). `latent_charge_head`
+    # predicts per-atom charges that both condition the energy head (when it is a
+    # ChargeConditionedEnergyHead) and drive `coulomb_module`'s long-range energy.
+    # `latent_spin_head` is optional per-atom spin conditioning. See `energy_fn`.
+    latent_charge_head: eqx.Module | None = None
+    latent_spin_head: eqx.Module | None = None
+    coulomb_module: eqx.Module | None = None
     # Force/stress target normalizers (torch grad_forces/grad_stress_normalizer).
     # Online stat buffers, not params -- default to identity until fit/copied. Their
     # running mean/std are advanced by `update_normalizer_buffers` (not the optimiser).
@@ -167,6 +179,9 @@ def trainable_filter(model: ConservativeRegressor) -> ConservativeRegressor:
     ]
     if model.pair_repulsion is not None:
         getters.append(lambda m: m.pair_repulsion)
+    if model.coulomb_module is not None:
+        # `coulomb_constant` is a fixed physical constant (torch buffer), not a param.
+        getters.append(lambda m: m.coulomb_module)
     for getter in getters:
         spec = eqx.tree_at(
             getter, spec, replace=jax.tree_util.tree_map(lambda _: False, getter(spec))
@@ -218,11 +233,63 @@ def energy_fn(
     graph = eqx.tree_at(lambda g: g.edge_features["vectors"], graph, vectors)
 
     out = model.gns(graph)
-    interaction = model.energy_head(out["node_features"], graph)  # (G,)
+    node_features = out["node_features"]
+
+    # OrbMol-v2 per-atom charges/spins (None on the v1/conservative configs). They
+    # are read off the backbone features, so they inherit the full
+    # position/strain/rotation dependence and need no special grad handling.
+    latent_charges = (
+        model.latent_charge_head(node_features, graph)
+        if model.latent_charge_head is not None
+        else None
+    )
+    latent_spins = (
+        model.latent_spin_head(node_features, graph)
+        if model.latent_spin_head is not None
+        else None
+    )
+
+    if isinstance(model.energy_head, ChargeConditionedEnergyHead):
+        interaction = model.energy_head(node_features, graph, latent_charges, latent_spins)  # (G,)
+    else:
+        interaction = model.energy_head(node_features, graph)  # (G,)
+
     # ZBL repulsion (if present) is just another energy term sharing the same
     # differentiable `vectors`, so it flows into forces/stress via the outer grad.
     if model.pair_repulsion is not None:
         interaction = interaction + model.pair_repulsion(graph)
+
+    # Coulomb electrostatics from the predicted charges.
+    if model.coulomb_module is not None:
+        if graph.pme_prep is not None:
+            # Periodic (PME/Ewald via jax-pme). Unlike the non-periodic sum, the energy
+            # depends on the cell, so it MUST see the strain-displaced + rotated
+            # positions AND cell (built exactly like the GNN edge vectors) -> it then
+            # contributes to stress (dE/d displacement) and the rotational grad, matching
+            # torch's periodic explicit-virial path.
+            s_pos, s_cell = apply_stress_displacement(
+                positions,
+                graph.system_features["cell"],
+                stress_displacement,
+                graph.per_node_graph_index,
+            )
+            rotation = rotation_from_generator(generator)
+            s_pos = jnp.einsum("ni,nij->nj", s_pos, rotation[graph.per_node_graph_index])
+            s_cell = jnp.einsum("gij,gjk->gik", s_cell, rotation)
+            interaction = interaction + model.coulomb_module.periodic_energy(
+                latent_charges, s_pos, s_cell, graph.pme_prep
+            )
+        else:
+            # Non-periodic direct sum. It must see the differentiable `positions`
+            # ARGUMENT (so forces pick up the electrostatics, incl. the charge-
+            # equilibration term through q(positions)), but NOT the strain-displaced
+            # positions: like torch, the direct sum reads raw leaf positions, so it
+            # contributes to forces and the rotational grad (via charges) yet adds
+            # nothing to stress (dE/d(displacement)=0).
+            coulomb_graph = eqx.tree_at(
+                lambda g: g.node_features["positions"], graph, positions
+            )
+            interaction = interaction + model.coulomb_module(latent_charges, coulomb_graph)
     return interaction
 
 

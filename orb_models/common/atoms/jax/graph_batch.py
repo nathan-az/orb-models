@@ -70,6 +70,15 @@ class JaxAtomGraphs(eqx.Module):
     # `None` means "not padded" -> all masks are all-True (legacy / single-graph).
     n_real_graph: jax.Array | None = None
 
+    # --- OrbMol-v2 periodic electrostatics prep (None unless periodic Coulomb) ----
+    # Host-prepped jax-pme batch containers `(sr_batch, nonperiodic_batch,
+    # periodic_batch)` from `forcefield.models.jax.pme.build_pme_batch`, sized to this
+    # graph's bucket. Carries the fixed PME real-space neighbour list + k-grid + masks
+    # (the non-jittable boundary). Read only by the periodic branch of
+    # `conservative_regressor.energy_fn`; a tuple of namedtuple pytrees, so it threads
+    # through jit. `None` -> non-periodic (direct dense Coulomb) or no electrostatics.
+    pme_prep: tuple | None = None
+
 
 def torch_to_jax(tensor: "Tensor") -> jax.Array:
     return jnp.asarray(tensor.detach().cpu().numpy())

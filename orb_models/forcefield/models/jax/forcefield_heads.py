@@ -218,3 +218,176 @@ class EnergyHead(eqx.Module):
             n_graphs,
         )
         return interaction_energy + ref.astype(interaction_energy.dtype)
+
+
+class ChargeConditionedEnergyHead(EnergyHead):
+    """Energy head conditioned on per-atom charges (and optionally spins).
+
+    Port of torch ChargeConditionedEnergyHead. Unlike EnergyHead -- which pools
+    node features first then applies the MLP -- this applies the MLP PER ATOM
+    (with charge/spin appended), denormalizes each atom's contribution, then
+    SUM-pools. Sum-pooling preserves size-consistency: for two non-interacting
+    subsystems, E(A u B) = E(A) + E(B). The MLP input is widened by 1 (+1 for
+    spins). `normalize_for_loss`/`absolute_energy` are inherited unchanged (they
+    only touch the normalizer/reference, which act on the per-atom-average).
+    """
+
+    use_spins: bool = eqx.field(static=True, default=False)
+
+    def __init__(
+        self,
+        latent_dim: int,
+        num_mlp_layers: int,
+        mlp_hidden_dim: int,
+        *,
+        key,
+        use_spins: bool = False,
+        predict_atom_avg: bool = True,
+        activation: str = "silu",
+        loss_type: str = "huber_0.01",
+    ):
+        assert predict_atom_avg, "ChargeConditionedEnergyHead always uses per-atom energy"
+        super().__init__(
+            latent_dim=latent_dim + 1 + int(use_spins),
+            num_mlp_layers=num_mlp_layers,
+            mlp_hidden_dim=mlp_hidden_dim,
+            key=key,
+            predict_atom_avg=True,
+            activation=activation,
+            loss_type=loss_type,
+        )
+        self.use_spins = use_spins
+
+    def __call__(  # type: ignore[override]
+        self,
+        node_features: jax.Array,
+        graph,
+        per_atom_charges: jax.Array,
+        per_atom_spins: jax.Array | None = None,
+    ) -> jax.Array:
+        """Interaction energy ``(G,)``, conditioned on per-atom charges/spins."""
+        features = jnp.concatenate([node_features, per_atom_charges], axis=-1)
+        if self.use_spins:
+            assert per_atom_spins is not None, "per_atom_spins required when use_spins=True"
+            features = jnp.concatenate([features, per_atom_spins], axis=-1)
+        per_atom_mlp = self.mlp(features).squeeze(-1)  # (N,)
+        per_atom_energy = self.normalizer.inverse(per_atom_mlp)  # (N,)
+        return aggregate_nodes(
+            per_atom_energy[:, None],
+            graph.per_node_graph_index,
+            graph.n_node,
+            reduction="sum",
+        ).squeeze(-1)
+
+
+# --- OrbMol-v2: per-atom latent charge / spin heads --------------------------
+# These predict per-atom scalars that (1) condition the energy head and (2) feed
+# the CoulombModule. Both apply a small MLP per atom then optionally enforce a
+# per-system linear constraint. The torch `repeat_interleave(n_node)` that
+# broadcasts a per-graph quantity onto its atoms is replaced by a GATHER through
+# `per_node_graph_index` -- a fixed-shape op, so the head jits under padding (the
+# same trick the ChargeSpinConditioner uses).
+
+
+def _enforce_per_system_sum(
+    values: jax.Array,  # (N, 1)
+    graph,
+    target_total: jax.Array | None,  # (G,) desired per-system sum, or None
+) -> jax.Array:
+    """Center `values` to zero per-system mean, then (if given) shift so each
+    system sums to `target_total`. Mirrors the torch centering/shift, with the
+    per-graph -> per-atom broadcast done by gather instead of repeat_interleave.
+    """
+    pgi = graph.per_node_graph_index
+    mean = aggregate_nodes(values, pgi, graph.n_node, reduction="mean")  # (G, 1)
+    values = values - mean[pgi]
+    if target_total is not None:
+        # clamp n_node >= 1 so empty padding graphs (n_node=0) give 0/1=0, not 0/0.
+        shift = target_total / jnp.maximum(graph.n_node, 1)  # (G,)
+        values = values + shift[pgi][:, None]
+    return values
+
+
+class LatentChargeHead(eqx.Module):
+    """Per-atom latent charges from node features. Port of torch LatentChargeHead.
+
+    Charges are centered to zero per-system mean and (when `total_charge` is in
+    the system features) shifted so each system sums to its total charge, then
+    scaled by `charge_scale`.
+    """
+
+    mlp: MLP
+    enforce_total_charge: bool = eqx.field(static=True)
+    charge_scale: float = eqx.field(static=True)
+
+    def __init__(
+        self,
+        latent_dim: int,
+        num_mlp_layers: int = 1,
+        mlp_hidden_dim: int = 128,
+        *,
+        key,
+        enforce_total_charge: bool = True,
+        activation: str = "silu",
+        charge_scale: float = 1.0,
+    ):
+        self.mlp = MLP(
+            input_size=latent_dim,
+            hidden_layer_sizes=[mlp_hidden_dim] * (num_mlp_layers - 1),
+            output_size=1,
+            activation=activation,
+            key=key,
+        )
+        self.enforce_total_charge = enforce_total_charge
+        self.charge_scale = charge_scale
+
+    def __call__(self, node_features: jax.Array, graph) -> jax.Array:
+        """Predict per-atom charges ``(N, 1)``."""
+        charges = self.mlp(node_features)  # (N, 1)
+        if self.enforce_total_charge:
+            total_charge = graph.system_features.get("total_charge")
+            if total_charge is not None:
+                total_charge = total_charge.astype(charges.dtype)
+            charges = _enforce_per_system_sum(charges, graph, total_charge)
+        return charges * self.charge_scale
+
+
+class LatentSpinHead(eqx.Module):
+    """Per-atom latent spins from node features. Port of torch LatentSpinHead.
+
+    Spins are centered to zero per-system mean and (when `spin_multiplicity` is
+    in the system features) shifted so each system sums to 2S = multiplicity - 1.
+    """
+
+    mlp: MLP
+    enforce_spin_constraint: bool = eqx.field(static=True)
+
+    def __init__(
+        self,
+        latent_dim: int,
+        num_mlp_layers: int = 1,
+        mlp_hidden_dim: int = 128,
+        *,
+        key,
+        enforce_spin_constraint: bool = True,
+        activation: str = "silu",
+    ):
+        self.mlp = MLP(
+            input_size=latent_dim,
+            hidden_layer_sizes=[mlp_hidden_dim] * (num_mlp_layers - 1),
+            output_size=1,
+            activation=activation,
+            key=key,
+        )
+        self.enforce_spin_constraint = enforce_spin_constraint
+
+    def __call__(self, node_features: jax.Array, graph) -> jax.Array:
+        """Predict per-atom spins ``(N, 1)``."""
+        spins = self.mlp(node_features)  # (N, 1)
+        if self.enforce_spin_constraint:
+            multiplicity = graph.system_features.get("spin_multiplicity")
+            total_spin = None
+            if multiplicity is not None:
+                total_spin = multiplicity.astype(spins.dtype) - 1  # 2S
+            spins = _enforce_per_system_sum(spins, graph, total_spin)
+        return spins
