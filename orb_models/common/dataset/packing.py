@@ -1,7 +1,7 @@
 """Chunked first-fit-decreasing (FFD) packing of graphs into fixed-budget buckets.
 
 JAX training needs every batch padded to a *fixed* shape so XLA compiles the step
-once (see ``graph_batch.pad_to_bucket``). A bucket is bounded by several budgets,
+once (see ``graph_batch.to_padded_numpy``). A bucket is bounded by several budgets,
 each an axis of the padded arrays:
 
     * edges  -> ``[n_edge, ...]``  message passing (cost-dominant axis)

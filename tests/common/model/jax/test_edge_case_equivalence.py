@@ -16,6 +16,7 @@ the PADDED JAX path reproduces UNPADDED PyTorch on these graphs, per real entry.
 Shared weights, float64 both sides (conftest), so disagreement is a real bug.
 """
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
@@ -122,10 +123,13 @@ def _assert_padded_jax_matches_unpadded_torch(helpers, torch_model, jax_model, b
         int(batch.n_edge.sum()),
     )
     # Snapshot jax graph BEFORE the torch forward mutates the batch in place.
-    jax_graph = jgb.to_jax(batch)
     # Pad to a bucket strictly larger in every axis (forces a real padding graph
-    # plus a trailing empty graph slot -- the harder masking case).
-    padded = jgb.pad_to_bucket(jax_graph, n_pad=N + 5, e_pad=E + 7, g_pad=G + 2)
+    # plus a trailing empty graph slot -- the harder masking case). This batch has no
+    # targets, so `to_padded_numpy` returns an empty target dict (ignored here).
+    padded_np, _ = jgb.to_padded_numpy(
+        batch, n_pad=N + 5, e_pad=E + 7, g_pad=G + 2, has_stress=True
+    )
+    padded = jax.device_put(padded_np)
 
     out = torch_model(batch, fp64_energy=True)
     preds = predict(padded, jax_model, has_stress=True)

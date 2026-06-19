@@ -61,7 +61,7 @@ class JaxAtomGraphs(eqx.Module):
     radius: float = eqx.field(static=True)
 
     # --- padding bookkeeping (None on an unpadded graph) ---------------------
-    # Number of *real* graphs once `pad_to_bucket` has appended a dummy padding
+    # Number of *real* graphs once `to_padded_numpy` has appended a dummy padding
     # graph (jraph `pad_with_graphs` convention). Real graphs occupy slots
     # [0, n_real_graph); the absorbing padding graph sits at slot `n_real_graph`
     # and any further slots are empty padding graphs. Every loss/aggregation mask
@@ -87,7 +87,7 @@ def to_jax(graph: "AtomGraphs") -> JaxAtomGraphs:
         per_node_graph_index=torch_to_jax(graph.node_batch_index),
         per_edge_graph_index=torch_to_jax(graph._get_per_edge_graph_indices()),
         radius=graph.radius,
-        # Every graph the adapter produces is fully real until `pad_to_bucket`
+        # Every graph the adapter produces is fully real until `to_padded_numpy`
         # appends a padding graph; record the count so the masks have the right
         # cutoff even on an already-disjoint-batched torch graph.
         n_real_graph=jnp.asarray(graph.n_node.shape[0], dtype=jnp.int32),
@@ -115,156 +115,6 @@ def real_node_mask(graph: JaxAtomGraphs) -> jax.Array:
     return graph.per_node_graph_index < graph.n_real_graph
 
 
-# --- packing: the grouping POLICY (the disjoint concat is torch's) ------------
-
-
-def pack_graphs(graphs: list["AtomGraphs"], n_max: int, e_max: int) -> list["AtomGraphs"]:
-    """Greedily group single-system torch `AtomGraphs` into disjoint batches under
-    (n_max, e_max). Only the grouping *policy* is the JAX path's concern; the actual
-    disjoint concatenation (index offsets, `per_*_graph_index`, `n_node`/`n_edge`) is
-    delegated to torch `AtomGraphs.batch`, which already does exactly that -- we do
-    NOT re-implement offsetting on the JAX side.
-
-    First-fit to a budget: walk the list (caller shuffles first each epoch for
-    unbiased gradients), accumulating systems until the next would push either the
-    node total over `n_max` or the edge total over `e_max`, then start a new batch.
-    Because a cutoff graph has `E ~ avg_degree * N`, `e_max` is the binding budget
-    and `n_max` is mostly a guard; both caps leave headroom for `pad_to_bucket` to
-    top each batch up to the fixed bucket shape. A single system larger than a cap
-    becomes its own (over-budget) batch -- pick the bucket to dominate it.
-
-    Returns batched torch `AtomGraphs`, each ready for `to_jax` then `pad_to_bucket`.
-    """
-    # Deferred import keeps this module torch-free at import time; torch is only
-    # touched when the packer actually runs (host-side, before `to_jax`).
-    from orb_models.common.atoms.batch.graph_batch import AtomGraphs
-
-    batches: list["AtomGraphs"] = []
-    current: list["AtomGraphs"] = []
-    cur_n = cur_e = 0
-    for g in graphs:
-        n = int(g.n_node.sum())
-        e = int(g.n_edge.sum())
-        if current and (cur_n + n > n_max or cur_e + e > e_max):
-            batches.append(AtomGraphs.batch(current))
-            current, cur_n, cur_e = [], 0, 0
-        current.append(g)
-        cur_n += n
-        cur_e += e
-    if current:
-        batches.append(AtomGraphs.batch(current))
-    return batches
-
-
-# --- padding: top a packed batch up to a fixed bucket shape ------------------
-
-
-def _pad_axis0(x: jax.Array, target: int, fill=0) -> jax.Array:
-    """Pad `x` along axis 0 up to `target` rows with constant `fill`."""
-    pad = target - x.shape[0]
-    if pad == 0:
-        return x
-    widths = [(0, pad)] + [(0, 0)] * (x.ndim - 1)
-    return jnp.pad(x, widths, constant_values=fill)
-
-
-def pad_to_bucket(
-    graph: JaxAtomGraphs, n_pad: int, e_pad: int, g_pad: int
-) -> JaxAtomGraphs:
-    """Top a packed batch up to fixed `(n_pad, e_pad, g_pad)` so jit compiles ONCE.
-
-    Appends one dummy padding graph (jraph `pad_with_graphs` convention) at slot
-    `g = n_real_graph` that absorbs every slack node/edge; remaining graph slots are
-    empty (`n_node = n_edge = 0`). The bucket shape -- not the system contents --
-    is what `eqx.filter_jit` keys on, so every batch that fits one bucket reuses the
-    same compiled step.
-
-    Two padding choices keep the autodiff clean despite the masked-out padding:
-      * padding edges are self-loops on the first padding atom (`senders =
-        receivers = N`) so `segment_sum(num_segments=n_pad)` deposits their message
-        on a padding atom, never a real one;
-      * those edges get a nonzero `unit_shifts` ([1,0,0]) and the padding graphs get
-        an identity `cell`, so the recomputed edge `vectors` are nonzero. A zero
-        vector would make `||v||` -- and hence the force grad through it -- NaN, and
-        `0 * NaN` survives the loss mask. Identity cells also give the padding graphs
-        a finite (unit) volume, so the `stress = dE/d(disp) / volume` divide is safe.
-    """
-    n = graph.per_node_graph_index.shape[0]
-    e = graph.per_edge_graph_index.shape[0]
-    g = graph.n_node.shape[0]
-    if n_pad < n or e_pad < e or g_pad < g + 1:
-        raise ValueError(
-            f"bucket ({n_pad},{e_pad},{g_pad}) too small for packed batch "
-            f"({n},{e},{g}); need n_pad>=n, e_pad>=e, g_pad>=n_graphs+1."
-        )
-
-    # The absorbing padding graph occupies slot `g`; padding atoms/edges point at it.
-    node_idx = _pad_axis0(graph.per_node_graph_index, n_pad, fill=g)
-    edge_idx = _pad_axis0(graph.per_edge_graph_index, e_pad, fill=g)
-    # Padding edges are self-loops on the first padding atom (index n).
-    senders = _pad_axis0(graph.senders, e_pad, fill=n)
-    receivers = _pad_axis0(graph.receivers, e_pad, fill=n)
-
-    # n_node/n_edge: real counts, then the slack lands on the absorbing graph, then
-    # zeros for any trailing empty graphs.
-    extra = jnp.zeros((g_pad - g,), dtype=graph.n_node.dtype)
-    n_node = jnp.concatenate([graph.n_node, extra]).at[g].set(n_pad - n)
-    n_edge = jnp.concatenate([graph.n_edge, extra]).at[g].set(e_pad - e)
-
-    def pad_nodes(d):
-        return {k: _pad_axis0(v, n_pad) for k, v in d.items()}
-
-    def pad_edges(d):
-        out = {}
-        for k, v in d.items():
-            # Nonzero shift on padding edges -> nonzero vectors -> no NaN force grad.
-            fill = 1 if k == "unit_shifts" else 0
-            out[k] = _pad_axis0(v, e_pad, fill=fill)
-            if k == "unit_shifts":
-                out[k] = out[k].at[e:, 1:].set(0)  # exactly [1,0,0] per padding edge
-        return out
-
-    def pad_graphs(d):
-        out = {}
-        for k, v in d.items():
-            if k == "cell":  # identity cell on padding graphs -> finite unit volume
-                eye = jnp.broadcast_to(jnp.eye(3, dtype=v.dtype), (g_pad - g, 3, 3))
-                out[k] = jnp.concatenate([v, eye], axis=0)
-            else:
-                out[k] = _pad_axis0(v, g_pad)
-        return out
-
-    return JaxAtomGraphs(
-        senders=senders,
-        receivers=receivers,
-        n_node=n_node,
-        n_edge=n_edge,
-        node_features=pad_nodes(graph.node_features),
-        edge_features=pad_edges(graph.edge_features),
-        system_features=pad_graphs(graph.system_features),
-        per_node_graph_index=node_idx,
-        per_edge_graph_index=edge_idx,
-        radius=graph.radius,
-        n_real_graph=jnp.asarray(g, dtype=jnp.int32),
-    )
-
-
-def pad_targets(
-    targets: dict[str, jax.Array], n_pad: int, g_pad: int
-) -> dict[str, jax.Array]:
-    """Pad supervised targets to a graph's bucket shape (zeros; masked out of loss).
-
-    Per-node targets (`forces`, (N,3)) grow to `n_pad`; per-graph targets (`energy`
-    (G,), `stress` (G,6)) grow to `g_pad`. The fill value is irrelevant -- the loss
-    mask drops every padded row -- but it must be finite to keep grads clean.
-    """
-    out = {}
-    for k, v in targets.items():
-        target = n_pad if k == "forces" else g_pad
-        out[k] = _pad_axis0(v, target)
-    return out
-
-
 def extract_targets(
     graph: "AtomGraphs", *, has_stress: bool = True
 ) -> dict[str, jax.Array]:
@@ -273,8 +123,8 @@ def extract_targets(
     Keys match the loss/`property_definitions` fullnames. Per `_total_loss`: energy
     is ``(G,)`` absolute, forces ``(N, 3)``, stress ``(G, 6)`` Voigt. The graph
     adapter stores per-graph targets with a trailing dim, so energy/stress are
-    reshaped. Apply this BEFORE `to_jax`/`pad_to_bucket`'s torch forward mutates the
-    batch, then `pad_targets` to top the result up to the bucket shape.
+    reshaped. (The training path uses `to_padded_numpy`, which extracts + pads in one
+    pass; this standalone helper is for probes/tests that want the unpadded targets.)
     """
     targets = {
         "energy": torch_to_jax(graph.system_targets["energy"]).reshape(-1),  # (G,)
@@ -286,16 +136,16 @@ def extract_targets(
 
 
 # --- host-side (numpy) padded prep -------------------------------------------
-# `to_jax` + `pad_to_bucket` + `extract_targets` + `pad_targets` done in numpy.
-# Equivalent result, but built on the host with np.pad/np.concatenate instead of
-# eager `jnp` ops, then handed to the model via a single `jax.device_put`. The jnp
-# path dispatches ~20 tiny XLA ops per batch whose eager compile-cache misses on
-# the varying real shape -- ~300ms/batch. numpy is ~3ms and parallelises across
-# DataLoader workers (where there is no device anyway). See training/profile_prep.py.
+# THE conversion+padding path: torch `AtomGraphs` -> fixed-bucket padded arrays,
+# built on the host with np.pad/np.concatenate then handed to the model via a single
+# `jax.device_put`. Doing it in numpy (rather than eager `jnp` ops) matters: the jnp
+# route dispatched ~20 tiny XLA ops per batch whose eager compile-cache missed on the
+# varying real shape -- ~300ms/batch. numpy is ~3ms and parallelises across DataLoader
+# workers (where there is no device anyway). See training/profile_prep.py.
 
 
 def _np_pad_axis0(x: np.ndarray, target: int, fill=0) -> np.ndarray:
-    """np.pad along axis 0 up to `target` rows (numpy mirror of `_pad_axis0`)."""
+    """np.pad along axis 0 up to `target` rows with constant `fill`."""
     pad = target - x.shape[0]
     if pad == 0:
         return x
@@ -308,20 +158,25 @@ def to_padded_numpy(
 ) -> tuple[JaxAtomGraphs, dict[str, np.ndarray]]:
     """Build the fixed-bucket padded ``(JaxAtomGraphs, targets)`` entirely in numpy.
 
-    Mirrors ``extract_targets`` + ``to_jax`` + ``pad_to_bucket`` + ``pad_targets``
-    exactly (same autodiff-safe padding: self-loop padding edges, ``[1,0,0]`` shifts,
-    identity padding cells), but every leaf is a host ``np.ndarray``. Intended as a
-    DataLoader ``collate_fn`` step so the cost runs in worker processes; the train
-    loop then does one ``jax.device_put`` to land the whole pytree on device.
+    Tops a packed batch up to fixed ``(n_pad, e_pad, g_pad)`` so ``eqx.filter_jit``
+    compiles ONCE: appends one absorbing padding graph (jraph ``pad_with_graphs``
+    convention) at slot ``g`` that soaks up the slack nodes/edges. The padding is
+    autodiff-safe -- padding edges are self-loops on the first padding atom (so
+    ``segment_sum`` never deposits on a real atom), get a nonzero ``[1,0,0]``
+    ``unit_shifts`` (nonzero edge ``vectors`` -> no ``||v||`` NaN force grad), and the
+    padding graphs get an identity ``cell`` (finite unit volume for the stress divide).
+    Every leaf is a host ``np.ndarray``; intended as a DataLoader ``collate_fn`` step so
+    the cost runs in workers, with the train loop doing one ``jax.device_put``.
     """
     npf = lambda t: t.detach().cpu().numpy()
-    # Targets first (read-only, before anything touches the torch batch).
-    targets = {
-        "energy": npf(graph.system_targets["energy"]).reshape(-1),
-        "forces": npf(graph.node_targets["forces"]),
-    }
-    if has_stress:
-        targets["stress"] = npf(graph.system_targets["stress"]).reshape(-1, 6)
+    # Targets first (read-only, before anything touches the torch batch). A batch with
+    # no supervised targets (e.g. forward-only equivalence tests) -> empty dict.
+    targets: dict[str, np.ndarray] = {}
+    if "energy" in graph.system_targets:
+        targets["energy"] = npf(graph.system_targets["energy"]).reshape(-1)
+        targets["forces"] = npf(graph.node_targets["forces"])
+        if has_stress:
+            targets["stress"] = npf(graph.system_targets["stress"]).reshape(-1, 6)
 
     n = graph.node_batch_index.shape[0]
     e = graph.senders.shape[0]

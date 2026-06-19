@@ -40,7 +40,7 @@ locked to torch -- the two paths are already proven equal in test_grad_equivalen
 so we don't re-compare them to each other here.
 
 PADDING (the `padded` parametrization): the jax side additionally runs through
-`pad_to_bucket` + `pad_targets` -- the SAME systems topped up with a dummy padding
+`to_padded_numpy` -- the SAME systems topped up with a dummy padding
 graph/atoms/edges to a larger fixed bucket. torch always runs the unpadded
 multi-example batch. So the `padded` case proves the headline property of the
 packing+padding work: a packed+padded+masked jax step is bit-for-bit (fp64) the same
@@ -56,6 +56,7 @@ keeps a divergence here unambiguously about the optimiser/grads, not the stats.
 import copy
 
 import equinox as eqx
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -144,15 +145,21 @@ def test_two_train_steps_match_torch(helpers, key, grad_fn, padded):
 
     a = _arrays()
     targets = _targets_np(a)
-    jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
     # jax graph is immutable across forwards (tree_at copies), so build it once.
-    jax_graph = jgb.to_jax(_torch_graph(a))
     if padded:
         # Top the SAME systems up to a larger fixed bucket; torch stays unpadded.
         # The masks must make every comparison below identical to the unpadded run.
+        # `to_padded_numpy` is the production conversion+padding path (it reads the
+        # targets straight off the torch batch, so set them first).
         n_pad, e_pad, g_pad = a["N"] + 6, a["E"] + 9, a["G"] + 2
-        jax_graph = jgb.pad_to_bucket(jax_graph, n_pad, e_pad, g_pad)
-        jax_targets = jgb.pad_targets(jax_targets, n_pad, g_pad)
+        tg = _torch_graph(a)
+        _set_targets(tg, targets)
+        graph_np, targets_np = jgb.to_padded_numpy(tg, n_pad, e_pad, g_pad, has_stress=True)
+        jax_graph = jax.device_put(graph_np)
+        jax_targets = jax.device_put(targets_np)
+    else:
+        jax_graph = jgb.to_jax(_torch_graph(a))
+        jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
 
     optimizer = make_optimizer(lr=LR, total_steps=TOTAL_STEPS)
     opt_state = init_opt_state(jax_model, optimizer)
@@ -301,12 +308,16 @@ def test_live_normalizer_two_steps_match_torch(helpers, key, padded):
 
     a = _arrays()
     targets = _targets_np(a)
-    jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
-    jax_graph = jgb.to_jax(_torch_graph(a))
     if padded:
         n_pad, e_pad, g_pad = a["N"] + 6, a["E"] + 9, a["G"] + 2
-        jax_graph = jgb.pad_to_bucket(jax_graph, n_pad, e_pad, g_pad)
-        jax_targets = jgb.pad_targets(jax_targets, n_pad, g_pad)
+        tg = _torch_graph(a)
+        _set_targets(tg, targets)
+        graph_np, targets_np = jgb.to_padded_numpy(tg, n_pad, e_pad, g_pad, has_stress=True)
+        jax_graph = jax.device_put(graph_np)
+        jax_targets = jax.device_put(targets_np)
+    else:
+        jax_graph = jgb.to_jax(_torch_graph(a))
+        jax_targets = {k: jnp.asarray(v) for k, v in targets.items()}
 
     optimizer = make_optimizer(lr=LR, total_steps=TOTAL_STEPS)
     opt_state = init_opt_state(jax_model, optimizer)

@@ -295,7 +295,7 @@ def _total_loss(
 
     Targets: `energy` (G,) absolute, `forces` (N,3), `stress` (G,6) Voigt.
 
-    Padding: when `graph` was topped up by `pad_to_bucket`, the padding graph/atoms
+    Padding: when `graph` was topped up by `to_padded_numpy`, the padding graph/atoms
     must not enter the averages. `real_*_mask` drops them (a no-op all-True mask on
     an unpadded graph), so a padded+masked loss equals summing the same systems
     individually.

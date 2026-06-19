@@ -33,7 +33,7 @@ def _masked_mean(per_row: jax.Array, mask: jax.Array | None) -> jax.Array:
     real rows only; `None` -> plain mean (no padding, the legacy/single-graph path).
 
     Padding rows MUST already be finite (no NaN/inf): `0 * NaN == NaN` would survive
-    the mask. The padding constructed by `pad_to_bucket`/`pad_targets` guarantees this.
+    the mask. The padding constructed by `to_padded_numpy` guarantees this.
     """
     if mask is None:
         return per_row.mean()
