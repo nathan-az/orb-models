@@ -25,6 +25,13 @@ dependencies = [
 
 [project.optional-dependencies]
 torchsim = ["torch-sim-atomistic>=0.6.0"]
+jax = [
+    # Install a platform-specific jax build first (CPU/CUDA/ROCm); see
+    # https://docs.jax.dev/en/latest/installation.html
+    "equinox>=0.11.0",
+    "jax-pme @ git+https://github.com/lab-cosmo/jax-pme.git",
+]
+mlflow = ["mlflow>=2.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]
