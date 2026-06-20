@@ -89,15 +89,29 @@ def test_fp32_vs_fp64_energy_per_atom_large_system(key):
     e32 = float(jnp.asarray(model32.energy_head.absolute_energy(preds32.energy, graph32)).reshape(-1)[0])
     f32 = np.asarray(preds32.forces)
 
+    # fp32 interaction prediction, but reconstruct the absolute energy with the host
+    # fp64 add (`reconstruct_absolute_energy`). This removes the fp32 reference-add
+    # floor; the residual is only the fp32 BACKBONE interaction error.
+    from orb_models.forcefield.models.jax.conservative_regressor import (
+        reconstruct_absolute_energy,
+    )
+
+    coeffs_f64 = np.asarray(model32.energy_head.reference.coefficients, dtype=np.float64)
+    e32_recon = float(
+        reconstruct_absolute_energy(np.asarray(preds32.energy), jax_graph, coeffs_f64)[0]
+    )
+
     err64_per_atom = abs(e64 - e_ref) / n_atoms
     err32_per_atom = abs(e32 - e_ref) / n_atoms
+    err32_recon_per_atom = abs(e32_recon - e_ref) / n_atoms
     f64_err = np.abs(f64 - f_ref).max()
     f32_err = np.abs(f32 - f_ref).max()
 
     print(f"\n[{n_atoms} atoms]  torch-fp64 abs E = {e_ref:.4f} eV ({e_ref_per_atom:.4f} eV/atom)")
-    print(f"  jax-fp64  |dE|/atom = {err64_per_atom:.2e} eV   forces max err = {f64_err:.2e} eV/A")
-    print(f"  jax-fp32  |dE|/atom = {err32_per_atom:.2e} eV   forces max err = {f32_err:.2e} eV/A")
-    print(f"  fp32/fp64 energy-error ratio = {err32_per_atom / max(err64_per_atom, 1e-30):.1f}x")
+    print(f"  jax-fp64            |dE|/atom = {err64_per_atom:.2e} eV   forces max err = {f64_err:.2e} eV/A")
+    print(f"  jax-fp32 (fp32 add) |dE|/atom = {err32_per_atom:.2e} eV   forces max err = {f32_err:.2e} eV/A")
+    print(f"  jax-fp32 (fp64 add) |dE|/atom = {err32_recon_per_atom:.2e} eV")
+    print(f"  fp32 add / fp64 add energy-error ratio = {err32_per_atom / max(err32_recon_per_atom, 1e-30):.1f}x")
 
     # fp64 path is tight parity with torch (maths, not precision).
     assert err64_per_atom < 1e-5, f"jax-fp64 energy/atom off: {err64_per_atom:.2e}"
@@ -109,3 +123,12 @@ def test_fp32_vs_fp64_energy_per_atom_large_system(key):
 
     # Forces are essentially precision-independent (reference cancels in the gradient).
     assert f32_err < 5e-3, f"jax-fp32 forces unexpectedly degraded: {f32_err:.2e}"
+
+    # The host fp64 reconstruction removes the fp32 reference-add floor: it is strictly
+    # better than the fp32 add and recovers most of the gap to the fp64 path (the
+    # residual is the fp32 backbone interaction, not the reference add).
+    assert err32_recon_per_atom < err32_per_atom, "fp64 add should beat fp32 add"
+    assert err32_recon_per_atom < err32_per_atom / 2, (
+        f"fp64 reconstruction did not remove the bulk of the floor: "
+        f"fp32add={err32_per_atom:.2e} fp64add={err32_recon_per_atom:.2e}"
+    )

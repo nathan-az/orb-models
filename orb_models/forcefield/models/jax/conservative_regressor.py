@@ -34,6 +34,7 @@ from __future__ import annotations
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from orb_models.common.atoms.jax.graph_batch import (
     JaxAtomGraphs,
@@ -100,6 +101,27 @@ def _interaction_target(
     return raw_target - reference
 
 
+def _interaction_target_from(
+    targets: dict[str, jax.Array],
+    head,
+    graph: JaxAtomGraphs,
+    n_graphs: int,
+) -> jax.Array:
+    """The (G,) interaction-energy target the loss/normalizer fit.
+
+    Prefers a HOST-precomputed `targets["interaction_energy"]` (the fp64
+    `raw - reference` from `to_padded_numpy`, cast to fp32 -- precise even at OMol
+    ~1e5 eV scale). Falls back to the in-graph fp32 `raw - reference` when it is
+    absent (forward-only / parity tests that feed only an absolute `energy`).
+    """
+    if "interaction_energy" in targets:
+        return targets["interaction_energy"]
+    reference = head.reference(
+        graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
+    )
+    return _interaction_target(targets["energy"], reference)
+
+
 def update_normalizer_buffers(
     model: ConservativeRegressor,
     targets: dict[str, jax.Array],
@@ -121,10 +143,7 @@ def update_normalizer_buffers(
     # no-ops on an unpadded graph).
     graph_mask = real_graph_mask(graph)  # (G,)
     node_mask = real_node_mask(graph)  # (N,)
-    reference = head.reference(
-        graph.node_features["atomic_numbers"], graph.per_node_graph_index, n_graphs
-    )
-    interaction_target = _interaction_target(targets["energy"], reference)
+    interaction_target = _interaction_target_from(targets, head, graph, n_graphs)
     if head.atom_avg:
         # clamp >=1: empty padding graphs have n_node=0; without the clamp the inf
         # they produce would reach the masked mean as 0*inf=NaN.
@@ -340,6 +359,30 @@ def predict(
     )
 
 
+def reconstruct_absolute_energy(
+    interaction_energy,
+    graph: JaxAtomGraphs,
+    reference_coefficients,
+):
+    """fp64 absolute energy ``(G,)`` = predicted interaction + element reference.
+
+    Inference counterpart of the training-side host subtraction. The network only
+    predicts the small (~eV) `interaction_energy` in fp32; adding back the ~1e5 eV
+    reference IN fp32 would round the result to the reference's ~meV grid (the
+    observed ~1.4 meV/atom fp32 floor). Done here in numpy fp64 on the host --
+    non-differentiable, no `jax_enable_x64` needed. `reference_coefficients` is
+    upcast to fp64 (mirrors torch `reference.double()`); pass the SAME fp32
+    `model.energy_head.reference.coefficients` torch uses so the reference matches.
+    """
+    Z = np.asarray(graph.node_features["atomic_numbers"]).astype(np.int64)
+    pgi = np.asarray(graph.per_node_graph_index).astype(np.int64)
+    n_graphs = graph.n_node.shape[0]
+    # fp64 upcast so the per-graph reference accumulation + final add run in fp64.
+    ref_coeffs = np.asarray(reference_coefficients, dtype=np.float64)
+    ref_per_graph = np.bincount(pgi, weights=ref_coeffs[Z], minlength=n_graphs)
+    return np.asarray(interaction_energy, dtype=np.float64) + ref_per_graph
+
+
 def _total_loss(
     energy: jax.Array,
     dE_dpos: jax.Array,
@@ -372,10 +415,9 @@ def _total_loss(
     node_mask = real_node_mask(graph)  # (N,) real atoms
 
     # Energy: huber on reference-subtracted, normalized interaction energy.
-    reference = head.reference(
-        graph.node_features["atomic_numbers"], graph.per_node_graph_index, graph.n_node.shape[0]
+    interaction_target = _interaction_target_from(
+        targets, head, graph, graph.n_node.shape[0]
     )
-    interaction_target = _interaction_target(targets["energy"], reference)
     e_pred = head.normalize_for_loss(energy, graph)
     e_target = head.normalize_for_loss(interaction_target, graph)
     energy_l = weights["energy"] * mean_error(e_pred, e_target, head.loss_type, graph_mask)

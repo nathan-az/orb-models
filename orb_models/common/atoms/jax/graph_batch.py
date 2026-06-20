@@ -163,7 +163,13 @@ def _np_pad_axis0(x: np.ndarray, target: int, fill=0) -> np.ndarray:
 
 
 def to_padded_numpy(
-    graph: "AtomGraphs", n_pad: int, e_pad: int, g_pad: int, *, has_stress: bool
+    graph: "AtomGraphs",
+    n_pad: int,
+    e_pad: int,
+    g_pad: int,
+    *,
+    has_stress: bool,
+    reference_coefficients: np.ndarray | None = None,
 ) -> tuple[JaxAtomGraphs, dict[str, np.ndarray]]:
     """Build the fixed-bucket padded ``(JaxAtomGraphs, targets)`` entirely in numpy.
 
@@ -186,6 +192,28 @@ def to_padded_numpy(
         targets["forces"] = npf(graph.node_targets["forces"])
         if has_stress:
             targets["stress"] = npf(graph.system_targets["stress"]).reshape(-1, 6)
+        # fp64 reference subtraction on the HOST, before device_put downcasts to
+        # fp32. `energy` (and `reference_coefficients`) must still be fp64 here --
+        # build the dataset with dtype=float64 so the label survives the torch
+        # graph-construction `.to(dtype)` cast. The small interaction (~eV) casts
+        # to fp32 losslessly; doing `raw(~1e5) - ref(~1e5)` in fp32 instead loses
+        # ~meV to catastrophic cancellation (see conservative_regressor._total_loss).
+        # `reference_coefficients` is upcast to fp64 to mirror torch `reference.double()`.
+        if reference_coefficients is not None:
+            # fp64 upcast forces the per-graph accumulation + subtraction below to run
+            # in fp64 (NOT to recover the coefficients' own precision -- they are fp32
+            # in the model, same as torch). bincount sums the per-atom coefficients into
+            # their graph bins (fp64 weights -> fp64 output), the scatter-add we need
+            # since many atoms share a graph index.
+            ref_coeffs = np.asarray(reference_coefficients, dtype=np.float64)
+            atomic_numbers = npf(graph.node_features["atomic_numbers"]).astype(np.int64)
+            pgi = npf(graph.node_batch_index).astype(np.int64)
+            n_real = graph.n_node.shape[0]
+            ref_per_graph = np.bincount(
+                pgi, weights=ref_coeffs[atomic_numbers], minlength=n_real
+            )
+            energy_f64 = npf(graph.system_targets["energy"]).reshape(-1).astype(np.float64)
+            targets["interaction_energy"] = (energy_f64 - ref_per_graph).astype(np.float32)
 
     n = graph.node_batch_index.shape[0]
     e = graph.senders.shape[0]
