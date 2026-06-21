@@ -217,6 +217,7 @@ def orb_v3_conservative_architecture(
     has_electrostatics: bool = False,
     use_per_atom_spins: bool = False,
     device: torch.device | str | None = None,
+    checkpoint: str | None = None,
 ) -> ConservativeForcefieldRegressor:
     """The orb-v3 conservative architecture.
 
@@ -226,6 +227,10 @@ def orb_v3_conservative_architecture(
     prediction (LatentSpinHead) is added only when use_per_atom_spins is
     True; system-level charge/spin conditioning is always controlled by
     has_charge_spin_cond.
+
+    checkpoint forwards gradient (activation) checkpointing to the MoleculeGNS
+    backbone: None (off), 'reentrant', or 'non-reentrant'. Trades compute for a
+    lower peak-memory force backward; off by default to match the released model.
     """
     if has_charge_spin_cond or has_electrostatics:
         conditioner = ChargeSpinConditioner(latent_dim)
@@ -302,6 +307,7 @@ def orb_v3_conservative_architecture(
             conditioner=conditioner,
             activation=activation,
             mlp_norm="rms_norm",
+            checkpoint=checkpoint,
         ),
         ensure_grad_loss_weights=False,
         pair_repulsion=True,
