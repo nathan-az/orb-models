@@ -41,6 +41,8 @@ One finetuning step = forward + double-backward (forces), bucketed FFD-packed da
 
 Both JAX paths beat torch (~1.3–1.7× faster, ~1.7× leaner) despite paying for padding. Reverse is the fastest base step; the jvp **edge-chunk** lever cuts peak memory 4.6 → 1.4 GB (3.2×) at a ~1.4× step-time cost.
 
+![MLFlow screenshot of baseline step times](./img/baseline_step_times.png)
+
 **Large budget** (`64000` / `1040` / `190`, ≈ 952 atoms / 62k edges — 4× the base):
 
 | Run | grad path | lever | step (ms) | peak (GB) | atoms/s |
@@ -49,6 +51,12 @@ Both JAX paths beat torch (~1.3–1.7× faster, ~1.7× leaner) despite paying fo
 | `jax-reverse-large` | reverse | — | — | — | **OOM** |
 
 This is the payoff: jvp + chunking trains a bucket **4× larger** than the base, which torch cannot reach (it OOMs at ~16 k edges ≈ the base budget) and which reverse-mode JAX also OOMs on (chunking it just adds overhead on top of XLA's auto-remat). This also recovers relative speed (atoms/sec) while unlocking training on larger examples.
+
+**Training Parity**
+
+Losses and grad norms are not exactly equivalent but track very closely. Integration tests confirm parity (or near parity) between frameworks. Differences may be due simply to accumulated errors with different fusions (i.e. XLA) or minor differences in jax vs pytorch scheduler/optimizer.
+
+![MLFlow screenshot of baseline loss and grad norms](./img/loss_and_grad_norms.png)
 
 ---
 
