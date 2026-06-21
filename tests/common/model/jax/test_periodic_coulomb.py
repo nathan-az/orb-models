@@ -1,17 +1,11 @@
-"""Phase 0 (oracle) for the periodic Coulomb port.
+"""Pin down `jax-pme` as a trustworthy periodic Coulomb engine.
 
-We build the periodic branch on `jax-pme` (pure-JAX, CPU, autodiff-clean). These
-tests pin it down as a trustworthy engine WITHOUT requiring bit-parity with the
-torch nvalchemiops PME (a separate, deferred checkpoint-reproduction concern):
-
-  (a) jax-pme reproduces the analytic NaCl Madelung constant;
-  (b) jax-pme's non-periodic Ewald == our already-torch-validated non-periodic
-      `CoulombModule` (both are the bare 1/r all-pairs sum x COULOMB_CONSTANT);
-  (c) jax-pme's *periodic* energy converges to that isolated-molecule energy as
-      the box grows (mirrors torch `test_vacuum_gap_convergence`).
-
-If these hold, jax-pme is our periodic engine and (b) is the oracle the rest of
-the port is validated against.
+These do NOT require bit-parity with the torch nvalchemiops PME (a deferred concern);
+they validate the engine's physics:
+  (a) it reproduces the analytic NaCl Madelung constant;
+  (b) its non-periodic Ewald == our non-periodic `CoulombModule` (both the bare 1/r
+      all-pairs sum x COULOMB_CONSTANT) -- the oracle the rest of the port reuses;
+  (c) its periodic energy converges to the isolated-molecule energy as the box grows.
 """
 
 import numpy as np

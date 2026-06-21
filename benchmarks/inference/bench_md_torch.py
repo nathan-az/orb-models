@@ -29,7 +29,7 @@ class TorchStepper:
         torch.set_float32_matmul_precision(cfg.precision)
         self.dev = "cuda" if torch.cuda.is_available() else "cpu"
         # has_charge_spin_cond stays False: charge/spin ride on atoms.info (read by
-        # the adapter) -> conditioner + charge head, matching bench.py.
+        # the adapter) -> conditioner + charge head.
         self.model = orb_v3_conservative_architecture(
             has_charge_spin_cond=False, has_stress=cfg.stress,
             has_electrostatics=True, device=self.dev,

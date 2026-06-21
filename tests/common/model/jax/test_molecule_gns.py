@@ -70,6 +70,7 @@ def _build(use_embedding, key):
     return torch_model, jax_model
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("use_embedding", [False, True])
 def test_molecule_gns_forward_matches_torch(helpers, key, use_embedding):
     torch_model, jax_model = _build(use_embedding, key)

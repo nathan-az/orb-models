@@ -1,21 +1,13 @@
 """Energy-per-atom torch<->jax equivalence for the fp64 reference reconstruction.
 
-The network predicts only the small (~eV) interaction energy; the physical absolute
-energy is `interaction + per-element reference`, and at OMol molecular scale the
-reference is ~1e3-1e5 eV. Adding it back in fp32 rounds the result to the reference's
-~meV grid -- the documented ~1.4 meV/atom fp32 floor. `reconstruct_absolute_energy`
-does that add in numpy fp64 on the host (no jax_enable_x64), which should remove the
-floor and recover the torch fp64 absolute energy/atom.
+The network predicts only the small (~eV) interaction energy; the absolute energy is
+`interaction + per-element reference`, and at OMol scale the reference is ~1e3-1e5 eV.
+Adding it back in fp32 rounds to the reference's ~meV grid (the ~1.4 meV/atom fp32
+floor); `reconstruct_absolute_energy` does the add in host fp64, recovering the torch
+fp64 absolute energy/atom. Gated `integration` (uses the real OMol checkpoint).
 
-These use the REAL released OMol conservative checkpoint (native large references), so
-they are gated `integration` (download + convert) -- CI runs them with
-`--run-integration` and has no cached model. The related `test_inference_parity.py`
-covers the full fp32-deployment path; here we isolate the reconstruction ADD and the
-training-side target precision.
-
-NOTE: the jax test harness force-enables x64 (conftest), so an fp32 forward gets
-promoted back to fp64 by fp64 literals -- can't isolate the fp32 ADD that way. Instead
-reconstruct from a single parity (fp64) interaction in explicit numpy fp32 vs fp64.
+Because the conftest force-enables x64, an fp32 forward gets promoted back to fp64, so
+we instead reconstruct from a single fp64 interaction in explicit numpy fp32 vs fp64.
 """
 
 import numpy as np

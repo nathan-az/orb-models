@@ -3,11 +3,10 @@ torch-vs-JAX comparison (`train_jax.py` is the experimental arm).
 
 Same bucketed data path as the JAX trainer (FFD-packed buckets, size-decorrelated;
 see `orb_models.common.dataset.bucket_sampler`), but torch runs each bucket
-*unpadded* -- there is no XLA shape constraint, so no `pad_to_bucket`. The bucket
-caps double as a memory guard: the 10 GB card can't fit the full 44k-edge bucket
-under the conservative double-backward, so the defaults here are torch's ceiling
-(~16k edges); raise them on a bigger GPU, or use `grad_accum_steps` to emulate a
-larger effective batch from several small buckets.
+*unpadded* -- there is no XLA shape constraint, so no padding. The bucket caps
+double as a memory guard under the conservative double-backward: raise them on a
+larger GPU, or use `grad_accum_steps` to emulate a larger effective batch from
+several small buckets.
 
 torch's force/stress come from autograd of the energy (one conservative
 double-backward via `create_graph=True`, inside `model.loss`); there is a single
@@ -67,7 +66,7 @@ class TorchTrainConfig:
     # matmul_precision=tensorfloat32). Threaded into `set_torch_precision` + the
     # pretrained loader so both default dtype and matmul precision follow it.
     precision: str = "float32-high"
-    # --- bucket budgets + packing (defaults = torch's ~16k-edge ceiling) ----
+    # --- bucket budgets + packing (defaults sized for a memory-constrained GPU) ----
     edge_budget: int = 16000  # hard cap AND FFD edge cap (estimate space)
     node_budget: int = 260
     graph_budget: int = 16
@@ -101,7 +100,6 @@ class _CkptStack(torch.nn.Module):
     """Wrap one gnn stack so its activations are rematerialised in the backward.
 
     `use_reentrant=False` supports the conservative double-backward (create_graph).
-    Mirrors the wrapper used by the benchmark/probe so results stay comparable.
     """
 
     def __init__(self, stack: torch.nn.Module):

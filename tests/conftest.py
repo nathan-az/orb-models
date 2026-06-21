@@ -7,14 +7,25 @@ from orb_models.common import utils
 
 
 def pytest_addoption(parser):
-    """Add `--run-integration` to opt into slow/heavyweight tests (real-scale
-    architectures and tests that download released checkpoints), which are skipped
-    by default so the unit suite stays fast and offline."""
+    """Opt-in flags for test categories skipped by default:
+
+    * ``--run-integration``: slow/heavyweight tests (real-scale architectures and
+      tests that download released checkpoints).
+    * ``--run-equivalence``: JAX<->PyTorch numeric equivalence tests, which require
+      the torch reference and verify the JAX port matches torch (as opposed to the
+      fundamental unit tests that check the JAX code's behaviour on its own).
+    """
     parser.addoption(
         "--run-integration",
         action="store_true",
         default=False,
         help="run integration tests (real-scale models, checkpoint downloads)",
+    )
+    parser.addoption(
+        "--run-equivalence",
+        action="store_true",
+        default=False,
+        help="run JAX<->PyTorch numeric equivalence tests",
     )
 
 
@@ -24,15 +35,24 @@ def pytest_configure(config):
         "integration: slow/heavyweight test (real-scale model or checkpoint "
         "download); only runs with --run-integration",
     )
+    config.addinivalue_line(
+        "markers",
+        "equivalence: JAX<->PyTorch numeric equivalence test; only runs with "
+        "--run-equivalence",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--run-integration"):
-        return
-    skip = pytest.mark.skip(reason="needs --run-integration")
-    for item in items:
-        if "integration" in item.keywords:
-            item.add_marker(skip)
+    for opt, mark in (
+        ("--run-integration", "integration"),
+        ("--run-equivalence", "equivalence"),
+    ):
+        if config.getoption(opt):
+            continue
+        skip = pytest.mark.skip(reason=f"needs {opt}")
+        for item in items:
+            if mark in item.keywords:
+                item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True, scope="function")

@@ -71,6 +71,7 @@ def _node_features(N, seed=1):
 # ---- LatentChargeHead ----
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("with_charge", [True, False], ids=["total_charge", "no_total_charge"])
 @pytest.mark.parametrize("enforce", [True, False], ids=["enforce", "raw"])
 @pytest.mark.parametrize("scale", [1.0, 0.5])
@@ -100,6 +101,7 @@ def test_latent_charge_head_matches_torch(helpers, key, with_charge, enforce, sc
         np.testing.assert_allclose(sums / scale, TOTAL_CHARGE, atol=1e-9)
 
 
+@pytest.mark.equivalence
 def test_latent_spin_head_matches_torch(helpers, key):
     tg = _torch_graph(with_spin=True)
     jg = jgb.to_jax(tg)
@@ -122,6 +124,7 @@ def test_latent_spin_head_matches_torch(helpers, key):
 # ---- ChargeConditionedEnergyHead ----
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("use_spins", [False, True], ids=["charge_only", "charge_spin"])
 def test_charge_conditioned_energy_head_matches_torch(helpers, key, use_spins):
     tg = _torch_graph()

@@ -1,24 +1,15 @@
-"""Padded JAX vs UNPADDED PyTorch on the physical small-system edge cases.
+"""Padded JAX vs unpadded PyTorch on small-system edge cases.
 
-MPtrj is full of tiny periodic cells. ~1900 systems have a single atom, and a
-handful of those have *zero* edges (datasets/mptrj/sizes_full.csv). A single-atom
-cell is not energy-free: under PBC the atom's neighbours are its own periodic
-images, so it carries real self-loop edges (sender == receiver, nonzero shift) --
-and the few zero-edge cells are the degenerate case where the nearest image sits
-beyond the cutoff, leaving a reference-energy-only graph.
-
-These are exactly the inputs where padding/masking bugs hide: an empty edge set
-(`segment_sum` over nothing), a 1-node readout, and a self-loop whose recomputed
-vector must stay nonzero. test_padding.py shows padding is a no-op vs unpadded
-JAX; this module pins the harder invariant the migration actually cares about --
-the PADDED JAX path reproduces UNPADDED PyTorch on these graphs, per real entry.
-
-Shared weights, float64 both sides (conftest), so disagreement is a real bug.
+The inputs where padding/masking bugs hide: a single periodic atom with self-loop
+edges (sender == receiver, nonzero shift), a zero-edge graph (`segment_sum` over
+nothing), and a mixed batch of tiny + normal graphs. Shared weights, float64 both
+sides (conftest), so any disagreement is a real bug.
 """
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 from orb_models.common.atoms.batch.graph_batch import AtomGraphs
@@ -30,6 +21,8 @@ from orb_models.forcefield.models.jax.conservative_regressor import predict
 
 # Reuse the orb-v3-feature-set model + weight copy from the regressor test.
 from tests.common.model.jax.test_conservative_regressor import _build_real_features
+
+pytestmark = pytest.mark.equivalence
 
 # A cell small enough that nonzero unit shifts land self-image neighbours INSIDE
 # the 6 A cutoff: |shift @ (3*I)| is 3 A for an axis shift, ~5.2 A for [1,1,1].

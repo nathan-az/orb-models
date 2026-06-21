@@ -16,6 +16,8 @@ from orb_models.common.models.jax.nn_utils import (
 )
 from orb_models.common.models.nn_util import build_mlp, mlp_and_layer_norm
 
+pytestmark = pytest.mark.equivalence
+
 
 @pytest.fixture
 def rng():

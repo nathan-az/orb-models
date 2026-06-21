@@ -31,6 +31,7 @@ from orb_models.common.models.nn_util import (
 LATENT = 16
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize(
     "embedding_type",
     [
@@ -60,6 +61,7 @@ def test_embedding_matches_torch(helpers, key, embedding_type, target):
     helpers.assert_close(jax_out, torch_out)
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("target", ["charge", "spin"])
 def test_sin_embedding_grad_matches_torch(helpers, key, target):
     """Gradient w.r.t. the frequency param W must match torch -- in particular the
@@ -133,6 +135,7 @@ def _conditioner_batch(convert, *, with_padding):
     )
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("with_padding", [False, True])
 @pytest.mark.parametrize("emits_edge_embs", [False, True])
 def test_conditioner_matches_torch(helpers, key, with_padding, emits_edge_embs):

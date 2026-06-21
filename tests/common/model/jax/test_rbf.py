@@ -9,6 +9,7 @@ from orb_models.common.models.rbf import BesselBasis as TorchBesselBasis
 from orb_models.common.models.jax.rbf import BesselBasis
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("num_bases", [4, 8])
 def test_bessel_basis_matches_torch(helpers, num_bases):
     r_max = 6.0

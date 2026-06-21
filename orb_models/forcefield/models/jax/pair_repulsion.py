@@ -58,7 +58,6 @@ class ZBLBasis(eqx.Module):
         # gives Z+1 -- a quirk of the shipped model that we must reproduce for
         # parity. (With a one_hot(Z-1) graph, argmax+1 == Z, so this also matches
         # the equivalence-test graphs.)
-        # TODO: confirm that this bug is here to stay
         Z = jnp.argmax(graph.node_features["atomic_numbers_embedding"], axis=1) + 1
         Z_u = Z[senders].astype(c.dtype)
         Z_v = Z[receivers].astype(c.dtype)

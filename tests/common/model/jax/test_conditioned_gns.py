@@ -91,6 +91,7 @@ def _build(key):
     return torch_model, jax_model
 
 
+@pytest.mark.equivalence
 def test_conditioned_gns_matches_torch(helpers, key):
     torch_model, jax_model = _build(key)
     jax_model = helpers.copy_molecule_gns(jax_model, torch_model)

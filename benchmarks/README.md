@@ -4,7 +4,7 @@ Throughput / memory benchmarks for the **JAX port** of the orb forcefields again
 
 ## Motivation
 
-The port exists to get two things torch does not give us on a single 10 GB GPU:
+The port exists to get two things torch does not give us easily:
 
 1. **Whole-graph XLA fusion.** `jit` compiles the entire step (geometry → message passing → energy → force autodiff, plus PME at inference) into one optimised program. This is faster and leaner per step than torch's eager / `torch.compile` execution.
 2. **Composable autodiff + rematerialisation as memory levers.** JAX lets us change *how* the force/Hessian derivatives are taken and *what* gets recomputed in the backward pass, trading a slower step for a much smaller peak — which lets JAX fit inputs that the torch reference simply OOMs on.

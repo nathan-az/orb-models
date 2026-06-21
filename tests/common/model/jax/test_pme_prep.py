@@ -1,7 +1,6 @@
-"""Phase 1: validate the host-side PME prep (orb neighbour list -> jax-pme batch
-container) against jax-pme's own vesin-driven `prepare`. If the two batch
-assemblies give the same energy/forces, our orb-neighbour reuse is correct and we
-can build the periodic CoulombModule on top of it.
+"""Validate the host-side PME prep (orb neighbour list -> jax-pme batch container)
+against jax-pme's own vesin-driven `prepare`: matching energies confirm the
+orb-neighbour reuse assembles the container correctly.
 """
 
 import numpy as np

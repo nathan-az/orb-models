@@ -6,6 +6,7 @@ ScalarNormalizer stats so the (x-mean)/std affine is actually exercised.
 """
 
 import numpy as np
+import pytest
 import torch
 
 from orb_models.common.models.nn_util import ScalarNormalizer as TorchScalarNormalizer
@@ -22,6 +23,8 @@ from orb_models.forcefield.models.loss import (
 )
 
 import jax.numpy as jnp
+
+pytestmark = pytest.mark.equivalence
 
 
 def _matched_normalizer(mean, std):

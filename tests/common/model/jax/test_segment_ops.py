@@ -20,6 +20,7 @@ def softmax_inputs():
     return num_nodes, seg, data, weights
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("use_weights", [False, True])
 def test_segment_softmax_matches_torch(helpers, softmax_inputs, use_weights):
     num_nodes, seg, data, weights = softmax_inputs

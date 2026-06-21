@@ -10,10 +10,13 @@ import types
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 from orb_models.forcefield.models.forcefield_heads import EnergyHead as TorchEnergyHead
 from orb_models.forcefield.models.jax.forcefield_heads import EnergyHead
+
+pytestmark = pytest.mark.equivalence
 
 LATENT, N_LAYERS, HIDDEN = 8, 2, 16
 N_NODE = [3, 4]  # two graphs -> N = 7

@@ -1,18 +1,10 @@
-"""Integration parity test on a real, large system (gated by --run-integration).
+"""fp32 vs fp64 inference parity on a real large system (gated by --run-integration).
 
-Targets the concern that JAX's fp32 inference may degrade ABSOLUTE energy (and
-energy-per-atom) relative to the torch fp64 reference. The effect is largest when
-the per-element reference energies are large (OMol molecular scale ~1e3-1e5 eV),
-so we use the released OMol conservative checkpoint on a ~300-atom water cluster.
-
-What it pins down:
-  * jax-fp64 reproduces torch-fp64 absolute energy/atom + forces/stress (parity);
-  * jax-fp32 absolute energy/atom DEVIATES (quantified) -- the fp32 reference-add
-    floor -- while forces are essentially precision-independent (the constant
-    reference cancels in the energy gradient).
-
-This is the diagnostic for "should I worry about energy/atom in fp32?": the test
-prints the numbers and asserts the fp64 path is tight while bounding the fp32 gap.
+Quantifies whether JAX fp32 inference degrades absolute energy/atom vs the torch fp64
+reference (largest at OMol scale, ~1e3-1e5 eV references; uses the released OMol
+checkpoint on a ~300-atom water cluster). Asserts jax-fp64 reproduces torch-fp64
+energy/atom + forces/stress, while jax-fp32 energy/atom deviates (the fp32 reference-add
+floor) but forces stay precision-independent (the constant reference cancels in dE/dx).
 """
 
 import equinox as eqx

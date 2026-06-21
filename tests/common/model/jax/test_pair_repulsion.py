@@ -10,10 +10,13 @@ import types
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
 from orb_models.forcefield.models.pair_repulsion import ZBLBasis as TorchZBLBasis
+
+pytestmark = pytest.mark.equivalence
 
 N_NODE = [3, 4]  # two graphs -> N = 7
 N_EDGES = 12

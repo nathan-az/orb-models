@@ -27,12 +27,14 @@ def vectors():
     return np.random.default_rng(0).standard_normal((10, 3))
 
 
+@pytest.mark.equivalence
 def test_unit_vector_matches_torch(helpers, vectors):
     jax_out = UnitVector()(jnp.asarray(vectors))
     torch_out = TorchUnitVector()(torch.tensor(vectors))
     helpers.assert_close(jax_out, torch_out)
 
 
+@pytest.mark.equivalence
 def test_stable_normalize_matches_torch(helpers, vectors):
     """Away from zero, stabilisation is a no-op: equals plain normalization."""
     jax_out = StableNormalize()(jnp.asarray(vectors))
@@ -40,6 +42,7 @@ def test_stable_normalize_matches_torch(helpers, vectors):
     helpers.assert_close(jax_out, torch_out)
 
 
+@pytest.mark.equivalence
 def test_stable_normalize_grad_matches_torch(helpers, vectors):
     """First derivative agrees with torch autograd on non-degenerate input."""
     jax_grad = jax.grad(lambda x: jnp.sum(jnp.sin(StableNormalize()(x))))(
@@ -70,6 +73,7 @@ def test_stable_normalize_finite_hessian_at_zero():
     assert np.isfinite(np.asarray(hess)).all()
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("lmax", [0, 1, 2, 3, 4])
 @pytest.mark.parametrize("normalization", ["integral", "component", "norm"])
 def test_spherical_harmonics_matches_torch(helpers, vectors, lmax, normalization):
@@ -85,6 +89,7 @@ def test_spherical_harmonics_matches_torch(helpers, vectors, lmax, normalization
     helpers.assert_close(jax_out, torch_out)
 
 
+@pytest.mark.equivalence
 def test_spherical_harmonics_unnormalized_matches_torch(helpers, vectors):
     """normalize=False: SH of the raw (non-unit) vectors must also match torch."""
     jx = SphericalHarmonics(3, normalize=False, normalization="component")
@@ -92,6 +97,7 @@ def test_spherical_harmonics_unnormalized_matches_torch(helpers, vectors):
     helpers.assert_close(jx(jnp.asarray(vectors)), tx(torch.tensor(vectors)))
 
 
+@pytest.mark.equivalence
 def test_spherical_harmonics_grad_matches_torch(helpers, vectors):
     """First derivative agrees with torch autograd (SH is on the force path)."""
     jx = SphericalHarmonics(3, normalize=True, normalization="component")

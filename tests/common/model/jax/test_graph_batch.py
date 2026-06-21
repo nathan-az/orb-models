@@ -121,6 +121,7 @@ def test_to_jax(arrays):
 
 
 # --- rotation_from_generator ------------------------------------------------
+@pytest.mark.equivalence
 def test_rotation_from_generator_matches_torch(helpers, arrays):
     rng = np.random.default_rng(1)
     gen = rng.standard_normal((arrays["G"], 3, 3))
@@ -143,6 +144,7 @@ def test_rotation_from_generator_is_orthogonal(arrays):
 
 
 # --- apply_stress_displacement ----------------------------------------------
+@pytest.mark.equivalence
 @pytest.mark.parametrize("zero_displacement", [True, False])
 def test_apply_stress_displacement(helpers, arrays, zero_displacement):
     rng = np.random.default_rng(3)
@@ -172,6 +174,7 @@ def test_apply_stress_displacement(helpers, arrays, zero_displacement):
 
 
 # --- compute_differentiable_edge_vectors: forward ---------------------------
+@pytest.mark.equivalence
 def test_edge_vectors_forward_matches_torch(helpers, arrays):
     graph = _torch_graph(arrays)
     torch_vectors, _, _ = graph.compute_differentiable_edge_vectors()
@@ -191,6 +194,7 @@ def test_edge_vectors_forward_matches_torch(helpers, arrays):
 
 
 # --- forces / stress / equigrad: jax.grad vs torch.autograd -----------------
+@pytest.mark.equivalence
 def test_force_stress_equigrad_match_torch(helpers, arrays):
     """The actual contract: d(scalar of vectors) w.r.t. positions/displacement/
     generator must agree, since forces/stress/rotational_grad are exactly those.

@@ -81,6 +81,7 @@ def _assert_loader_parity(helpers, torch_model, jax_model, torch_graph):
     helpers.assert_close(jnp.asarray(jax_stress_voigt.numpy()), out["stress"])
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("has_charge_spin_cond", [False, True])
 def test_loader_infers_dims_matches_torch(helpers, key, has_charge_spin_cond):
     """Non-default dims: the loader must read latent/hidden/depth/activation off the

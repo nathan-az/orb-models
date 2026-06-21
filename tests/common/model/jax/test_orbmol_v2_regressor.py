@@ -168,6 +168,7 @@ def _build(key, use_spins=False):
     return torch_model, jax_model
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize("use_spins", [False, True], ids=["charge_only", "charge_spin"])
 def test_orbmol_v2_regressor_matches_torch(helpers, key, use_spins):
     torch_model, jax_model = _build(key, use_spins=use_spins)
@@ -188,6 +189,7 @@ def test_orbmol_v2_regressor_matches_torch(helpers, key, use_spins):
     helpers.assert_close(jnp.asarray(jax_stress_voigt.numpy()), out["stress"])
 
 
+@pytest.mark.equivalence
 @pytest.mark.parametrize(
     "checkpoint, ckpt_mode",
     [(False, "stack"), (True, "full")],

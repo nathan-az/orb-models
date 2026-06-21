@@ -1,10 +1,10 @@
-"""Phase 2: the differentiable periodic-energy wrapper.
+"""The differentiable periodic-energy wrapper `periodic_coulomb_energy`.
 
-`periodic_coulomb_energy` substitutes LIVE positions/cell into the host-prepped
-jax-pme batch and returns per-structure energy. We check that (a) it reproduces
-jax-pme's own energy, (b) `jax.grad` forces match jax-pme's analytic forces, (c)
-the strain-derivative matches jax-pme's analytic stress, and (d) it jits. This is
-the engine our CoulombModule periodic branch differentiates through.
+It substitutes live positions/cell into the host-prepped jax-pme batch and returns
+per-structure energy. Checks: (a) it reproduces jax-pme's own energy, (b) `jax.grad`
+forces match jax-pme's analytic forces, (c) the strain-derivative matches jax-pme's
+analytic stress, and (d) it jits. This is the engine the CoulombModule periodic
+branch differentiates through.
 """
 
 import numpy as np

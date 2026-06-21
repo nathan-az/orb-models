@@ -1,17 +1,10 @@
-"""Numerical equivalence of the edge-axis memory levers in `...jax.optimisation`.
+"""The edge-axis memory levers in `...jax.optimisation` must be pure memory transforms.
 
-`ChunkedStack` streams a whole `AttentionInteractionNetwork` over its edge axis
-via `lax.scan` so only a `chunk`-row slice of any per-edge tensor is ever live.
-That rewrite must be a pure memory transform: for the same weights and inputs it
-has to reproduce the un-chunked stack *exactly* (fp64), forwards AND through the
-gradient -- otherwise it silently corrupts training.
-
-These were originally validated only by the throughput benchmarks (shape, not
-maths). Here we pin the maths directly, with a focus on the orbmol_v2 path that
-the lever previously refused: a *conditioned* backbone (additive charge/spin
-embeddings on the nodes), sigmoid gate, distance cutoff.
-
-Run on CPU/fp64 (see conftest); shared weights => agreement is ~1e-12.
+`ChunkedStack` streams an `AttentionInteractionNetwork` over its edge axis via
+`lax.scan` so only a `chunk`-row slice of any per-edge tensor is ever live. For the
+same weights and inputs it must reproduce the un-chunked stack exactly (fp64),
+forwards and through the gradient, including the conditioned orbmol_v2 path (additive
+charge/spin embeddings, sigmoid gate, distance cutoff). Run on CPU/fp64 (conftest).
 """
 
 import equinox as eqx

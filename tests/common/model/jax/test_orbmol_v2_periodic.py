@@ -1,12 +1,11 @@
-"""Phase 4: end-to-end OrbMol-v2 with the PERIODIC Coulomb branch wired into the
-conservative regressor (jax-pme engine).
+"""End-to-end OrbMol-v2 with the periodic Coulomb branch (jax-pme engine) wired into
+the conservative regressor.
 
-There is no fp64 torch-parity here: jax-pme is not bit-identical to the torch
-nvalchemiops PME (different smearing/k-grid conventions), so we validate
-INTEGRATION + internal consistency instead -- finite energy/forces/stress through
-the full stack, the periodic Coulomb term actually contributing, jit==eager, and
-the 2nd-order training grads reaching the latent charge head. Physical correctness
-of the engine itself is anchored by test_periodic_coulomb / test_periodic_energy.
+No fp64 torch-parity here (jax-pme is not bit-identical to the torch nvalchemiops
+PME): we validate internal consistency instead -- finite energy/forces/stress through
+the full stack, the periodic Coulomb term actually contributing, jit==eager, and the
+2nd-order training grads reaching the latent charge head. Engine physics is anchored
+by test_periodic_coulomb / test_periodic_energy.
 """
 
 import equinox as eqx

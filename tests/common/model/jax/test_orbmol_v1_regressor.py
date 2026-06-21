@@ -44,6 +44,8 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
 from orb_models.forcefield.models.jax.forcefield_heads import EnergyHead
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
 
+pytestmark = pytest.mark.equivalence
+
 LATENT, STEPS, N_LAYERS, HIDDEN, NUM_BASES = 8, 2, 2, 16, 8
 N_NODE = [3, 2]
 SENDERS = [0, 1, 2, 0, 3, 4]

@@ -1,56 +1,22 @@
 """Two-step train-loop equivalence: jax vs torch, on the full orb-v3 model.
 
-This is the end-to-end "does a real training step agree with torch" check. It sits
-on top of the pieces already tested in isolation and ties them together across an
-*optimiser update*, which is the only thing none of the existing tests exercise:
+Ties together the isolated pieces (predictions, grads, optax step) across an
+*optimiser update*. Each step checks, against torch:
 
-  * predictions parity        -> test_conservative_regressor (energy/forces/stress)
-  * grads three ways          -> test_grad_equivalence (torch / reverse / jvp)
-  * optax step self-consistency -> test_train (partition contract, jit==eager)
+  * loss value parity (per-term + total) -- grads alone can't catch a constant offset;
+  * optimiser-mirror parity -- `make_optimizer` (optax) vs torch `get_optim`
+    (Adam + OneCycleLR): the LR curve and `cycle_momentum` beta1 only diverge after
+    step 0, so we assert the LR + beta1 used each step equal torch's exactly;
+  * loss + grad parity re-checked on the optimiser-moved weights after each step.
 
-What is NEW here, and why TWO steps:
+Two steps because the optimiser pieces above only diverge after step 0. We do NOT
+compare raw weights elementwise: Adam's update is eps-conditioned on near-zero-grad
+(loss-insensitive) directions, so weights drift ~1e-4 even with a perfect mirror,
+while the loss/grad re-checks stay tight (~1e-7).
 
-  1. LOSS VALUE parity. The grad test only compares *grads*; a constant offset in
-     the loss has zero grad, so the scalar loss value has never been checked against
-     torch. We compare the per-term + total loss directly.
-
-  2. OPTIMISER-MIRROR parity. `make_optimizer` (optax) must match torch `get_optim`
-     (Adam + OneCycleLR). Two pieces of that only diverge AFTER step 0, so a
-     single-step test cannot see them:
-       - the LR *curve* (the optax stock one-cycle agreed with torch only at step 0);
-       - OneCycleLR's `cycle_momentum=True`, which anneals Adam's beta1 and cancels in
-         the step-1 bias correction. We assert the LR and beta1 actually used each
-         step equal torch's, exactly -- this is the decisive mirror check.
-
-  3. EQUIVALENCE PRESERVED ACROSS THE UPDATE. We re-check loss + grad parity on the
-     optimiser-moved weights (after step 0 AND after step 1). This is the user's
-     "confirm the same is true after an update step".
-
-Note we deliberately do NOT compare raw weights elementwise after a step. Adam's
-first update is ~`lr * sign(g)`, so on parameters with near-zero gradient (which the
-loss is, by definition, insensitive to) the update is eps-conditioned and the two
-frameworks' weights drift by ~1e-4 even with a perfect optimiser mirror. That drift
-lives entirely in loss-insensitive directions, so the loss/grad re-checks above stay
-tight (~1e-7) while a fp64 weight comparison would be spuriously flaky. Schedule
-parity + identical grads + identical Adam rule already pin the update; the loss/grad
-re-checks confirm it functionally.
-
-Run once per jax grad path (jvp / reverse) so an update driven by either stays
-locked to torch -- the two paths are already proven equal in test_grad_equivalence,
-so we don't re-compare them to each other here.
-
-PADDING (the `padded` parametrization): the jax side additionally runs through
-`to_padded_numpy` -- the SAME systems topped up with a dummy padding
-graph/atoms/edges to a larger fixed bucket. torch always runs the unpadded
-multi-example batch. So the `padded` case proves the headline property of the
-packing+padding work: a packed+padded+masked jax step is bit-for-bit (fp64) the same
-training as torch's canonical disjoint batch -- loss, grads, and the optimiser
-trajectory across two updates -- with the padding excluded everywhere by the masks.
-
-Normalizers are FROZEN (online=False / inference no-op) so the only thing moving
-between steps is the weights via the optimiser. Buffer-update parity (torch BatchNorm
-momentum vs `update_normalizer_buffers`) is a separate equivalence question; freezing
-keeps a divergence here unambiguously about the optimiser/grads, not the stats.
+The `padded` parametrization additionally runs the jax side through `to_padded_numpy`
+(same systems + a dummy padding graph), proving a packed+padded+masked step matches
+torch's unpadded batch. Normalizers are frozen so only the weights move between steps.
 """
 
 import copy
@@ -88,6 +54,8 @@ from tests.common.model.jax.test_grad_equivalence import (
     _targets_np,
     _trainable_leaves,
 )
+
+pytestmark = pytest.mark.equivalence
 
 WEIGHTS = {"energy": 1.0, "forces": 1.0, "stress": 1.0}
 LR, TOTAL_STEPS, N_STEPS = 1e-3, 100, 2

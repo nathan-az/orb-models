@@ -18,6 +18,7 @@ def _batch(atomic_numbers):
     return types.SimpleNamespace(node_features={"atomic_numbers": atomic_numbers})
 
 
+@pytest.mark.equivalence
 def test_atom_embedding_matches_torch(helpers, key):
     emb_size, num_elements = 16, 118
     torch_emb = TorchAtomEmbedding(emb_size, num_elements)
@@ -42,7 +43,7 @@ def test_atom_embedding_casts_float_indices(helpers, key):
 
 
 def test_atom_embedding_init_distribution(key):
-    """Uniform(-sqrt(3), sqrt(3)) init -> bounded and ~unit variance, matching torch."""
+    """Uniform(-sqrt(3), sqrt(3)) init -> bounded and ~unit variance (matches torch's)."""
     w = np.asarray(AtomEmbedding(64, 118, key=key).embeddings.weight)
     assert w.min() >= -(3**0.5) - 1e-6
     assert w.max() <= 3**0.5 + 1e-6

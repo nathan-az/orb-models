@@ -21,6 +21,8 @@ from orb_models.common.atoms.jax import graph_batch as jgb
 from orb_models.forcefield.models.coulomb_module import CoulombModule as TorchCoulombModule
 from orb_models.forcefield.models.jax.coulomb_module import CoulombModule
 
+pytestmark = pytest.mark.equivalence
+
 
 def _torch_graph(positions, n_node):
     """Minimal non-periodic AtomGraphs (only the fields CoulombModule reads)."""

@@ -12,6 +12,8 @@ from orb_models.common.models.jax.gns import (
     Encoder,
 )
 
+pytestmark = pytest.mark.equivalence
+
 LATENT, N_LAYERS, HIDDEN = 8, 2, 16
 N_NODES, N_EDGES = 6, 10
 

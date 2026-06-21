@@ -14,6 +14,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 from orb_models.common.atoms.batch.graph_batch import AtomGraphs
@@ -41,6 +42,8 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
 )
 from orb_models.forcefield.models.jax.forcefield_heads import EnergyHead
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
+
+pytestmark = pytest.mark.equivalence
 
 LATENT, STEPS, N_LAYERS, HIDDEN, NUM_BASES = 8, 2, 2, 16, 8
 N_NODE = [3, 2]

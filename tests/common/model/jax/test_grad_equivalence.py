@@ -1,17 +1,11 @@
 """d(loss)/d(model) three ways must agree: torch backward, jax reverse-over-reverse,
-jax forward-over-reverse (jvp) -- ON THE TRAINABLE PARTITION ONLY.
+jax forward-over-reverse (jvp) -- on the trainable partition only.
 
-Why "trainable partition only": the loss genuinely depends on the frozen buffers
-(energy target = energy - reference; every term divides by a normalizer std), so
-reverse-mode returns *nonzero* grads for the reference/normalizer leaves while the
-jvp path returns zero and torch returns None (requires_grad=False). Those leaves are
-masked out of the optimiser by `trainable_filter`, so the contract we test is
-agreement on exactly the leaves the optimiser actually steps -- gns + energy_head.mlp.
-
-Setup mirrors the forward equivalence test: matched fp64 models, weights shared, plus
-non-trivial *frozen* normalizer stats so the 1/std folding is exercised. Online stat
-updates are turned off on both sides (covered separately by test_loss); this test
-isolates the autograd of the loss.
+The loss depends on the frozen buffers (energy - reference; every term divides by a
+normalizer std), so reverse-mode returns nonzero grads for those leaves while jvp
+returns zero and torch returns None. They are masked out of the optimiser by
+`trainable_filter`, so we compare only the leaves the optimiser actually steps.
+Frozen normalizer stats exercise the 1/std folding; online updates are off.
 """
 
 import copy
@@ -20,6 +14,7 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 import torch
 
 from orb_models.common.atoms.jax import graph_batch as jgb
@@ -33,6 +28,8 @@ from tests.common.model.jax.test_conservative_regressor import (
     _build,
     _torch_graph,
 )
+
+pytestmark = pytest.mark.equivalence
 
 WEIGHTS = {"energy": 1.0, "forces": 1.0, "stress": 1.0}
 

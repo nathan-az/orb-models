@@ -1,16 +1,16 @@
 #!/bin/bash
 
-# Benchmarks with node/edge/graph maxes for packing set to a budget that fits the
-# target GPU (these defaults were sized for an RTX 3080, 10 GB).
-#   jax is jit'd so pays for packing/padding, including some wasted compute
-#   torch compile does not work for training, but then has no wasted compute
+# Throughput/memory comparison: torch vs jax(jvp) vs jax(reverse). The base
+# node/edge/graph budgets below are sized so the bucket fits a memory-constrained
+# GPU; raise them on a larger card. The large budgets are 4x the base.
+#   jax is jit'd, so it pays for packing/padding (some wasted compute);
+#   torch compile does not work for training, but then has no wasted compute.
 #
-# Precision-matched throughput comparison: torch vs jax(jvp) vs jax(reverse), all
-# in fp32 with NO fp64 in the network -- isolating the framework gap from the
-# precision differences that muddied earlier runs. torch=float32-high (TF32) and
-# jax matmul_precision=high are the same TF32 math (orb's default), so compute aligns.
-# Short run (10 steps); warmup_steps drops JIT-compile / allocator-growth steps
-# from the median, so compare median_step_time + peak_mem_gb across the three.
+# Precision-matched: all runs are fp32 with NO fp64 in the network. torch
+# float32-high (TF32) and jax matmul_precision=high are the same TF32 math
+# (orb's default), so compute aligns. Short run; warmup_steps drops the
+# JIT-compile / allocator-growth steps from the median, so compare
+# median_step_time + peak_mem_gb across the runs.
 #
 # Usage: pass the dataset path as the first arg or via DATA_PATH:
 #   ./run_basic_benchmarks.sh /path/to/ase_sqlite.db
