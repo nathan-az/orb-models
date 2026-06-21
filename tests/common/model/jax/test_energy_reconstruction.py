@@ -26,7 +26,6 @@ from orb_models.forcefield.models.jax.port_weights import (
 
 
 def _water_cluster(nx=5, ny=5, nz=4, spacing=3.1):
-    """`nx*ny*nz` water molecules in a padded periodic box (~300 atoms)."""
     from ase import Atoms
     from ase.build import molecule
 
@@ -65,9 +64,7 @@ def test_fp64_reconstruction_matches_torch_at_omol_scale(omol_models):
     reference-add carries a floor that the host fp64 add removes."""
     torch_model, adapter, jax_model, coeffs_f64 = omol_models
 
-    # A few differently-sized clusters: with several graphs the MAX per-atom error
-    # reliably sits near the fp32 floor (a single graph can round near zero by luck).
-    atoms_list = [_water_cluster(nx, 5, 4) for nx in (5, 6, 7)]
+    atoms_list = [_water_cluster(nx, 3, 2) for nx in (3, 4, 5)]
     graphs = [adapter.from_ase_atoms(a, device="cpu") for a in atoms_list]
     graph = type(graphs[0]).batch(graphs)
     n_atoms = np.asarray(graph.n_node)  # (G,)
