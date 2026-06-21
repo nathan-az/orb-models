@@ -30,6 +30,7 @@ jax = [
     # https://docs.jax.dev/en/latest/installation.html
     "equinox>=0.11.0",
     "jax-pme @ git+https://github.com/lab-cosmo/jax-pme.git",
+    "optax>=0.2.8",
 ]
 mlflow = ["mlflow>=2.0"]
 
