@@ -7,16 +7,13 @@ import jax.numpy as jnp
 
 
 class RematStack(eqx.Module):
-    """Per-gnn-stack gradient checkpointing, applied purely from the outside.
+    """Gradient-checkpoint one `AttentionInteractionNetwork`.
 
-    Wraps one `AttentionInteractionNetwork` so its activations are dropped and
-    recomputed in the backward pass (`eqx.filter_checkpoint`). We swap each stack
-    for one of these via `eqx.tree_at` on the dynamic `gnn_stacks` list, so the
-    library `MoleculeGNS.__call__` (`for gnn in self.gnn_stacks: gnn(...)`) is
-    untouched -- the port stays pristine; checkpointing is an external concern.
-
-    `inner` is passed as an ARGUMENT to the checkpointed function (not closed
-    over) so filter_checkpoint can split its array params from its static config.
+    Wraps a stack so its activations are dropped in the forward and recomputed in the
+    backward (`eqx.filter_checkpoint`); swapped in via `eqx.tree_at`. Same call
+    signature as the wrapped stack. `inner` is passed as an argument to the
+    checkpointed function (not closed over) so `filter_checkpoint` can split its
+    array params from its static config.
     """
 
     inner: eqx.Module
@@ -43,26 +40,16 @@ def _checkpoint_stacks_manual(model):
 
 
 class ChunkedMLP(eqx.Module):
-    """Stream an `MLPAndLayerNorm` over its leading (edge/node) axis in tiles.
+    """Run an `MLPAndLayerNorm` over its leading (edge/node) axis in `chunk`-row tiles.
 
-    The lever for the *width* problem that checkpointing cannot touch: a Linear's
-    backward `W̄ = Xᵀ·Ȳ` is a reduction over the leading axis E, so its working set
-    is intrinsically `O(E·hidden)` no matter what is or isn't saved. Tiling turns
-    that reduction into a running sum over chunks of `chunk` rows, so only
-    `O(chunk·hidden)` is ever live.
+    Equivalent to `inner(x)` but with the MLP's working set reduced from
+    `O(rows·hidden)` to `O(chunk·hidden)`: `jax.lax.map` streams the tiles and the
+    weight gradients accumulate across them automatically. `remat=True` recomputes
+    each tile's activations in the backward instead of storing them. `inner` keeps its
+    original weights, so this is a pure call-time transform swapped in via `tree_at`.
 
-    We express the loop as `jax.lax.map` (a `scan` underneath): reverse-mode
-    transposes it into a loop whose cotangent w.r.t. the closed-over weights is
-    *accumulated* across iterations -- the streaming backward is automatic. But a
-    bare scan stashes every tile's residuals (re-materialising `[E, hidden]`), so
-    `remat=True` wraps the body in `eqx.filter_checkpoint`: each tile's activations
-    are recomputed in the backward, one tile at a time. The wrapped `inner` already
-    handles a batched `[chunk, K]` input (its Linears/RMSNorm vmap internally), so
-    a tile is just `inner(tile)`.
-
-    `inner` is the ORIGINAL module, so the params/treedef are unchanged -- this is a
-    pure call-time reshape, injected by `tree_at` exactly like the checkpointers,
-    and reversible by swapping `inner` back in.
+    Args:
+        x: `[rows, K]` input. Returns `[rows, out]`.
     """
 
     inner: eqx.Module
@@ -70,38 +57,33 @@ class ChunkedMLP(eqx.Module):
     remat: bool = eqx.field(static=True)
 
     def __call__(self, x: jax.Array, *, key=None) -> jax.Array:
-        n = x.shape[0]
-        # No-op fast path: one tile covers everything (or chunking disabled).
-        if self.chunk <= 0 or self.chunk >= n:
+        n_rows = x.shape[0]
+        if self.chunk <= 0 or self.chunk >= n_rows:  # no tiling needed
             return self.inner(x, key=key)
-        pad = (-n) % self.chunk
-        xp = jnp.pad(x, [(0, pad)] + [(0, 0)] * (x.ndim - 1))
-        tiles = xp.reshape(-1, self.chunk, *x.shape[1:])  # [n_tiles, chunk, K]
+        n_pad = (-n_rows) % self.chunk
+        padded = jnp.pad(x, [(0, n_pad)] + [(0, 0)] * (x.ndim - 1))
+        tiles = padded.reshape(-1, self.chunk, *x.shape[1:])  # [n_tiles, chunk, K]
         body = eqx.filter_checkpoint(self.inner) if self.remat else self.inner
         out = jax.lax.map(body, tiles)  # [n_tiles, chunk, out]
-        return out.reshape(-1, out.shape[-1])[:n]
+        return out.reshape(-1, out.shape[-1])[:n_rows]
 
 
 class ChunkedStack(eqx.Module):
-    """Tile a whole `AttentionInteractionNetwork` over its edge axis via `lax.scan`.
+    """Run a whole `AttentionInteractionNetwork` over its edge axis in `chunk`-row tiles.
 
-    `ChunkedMLP` only streams the edge MLP; measurements show that bottoms out at
-    the *other* full-E tensors of one stack's forward-over-reverse backward (the
-    `[E, 3L]` concat, the gathers, the attention) -- a floor neither edge-MLP
-    chunking nor stack-remat breaks. This streams ALL of them: only a `chunk`-row
-    slice of any per-edge tensor is ever live.
+    Equivalent to the wrapped stack but with a smaller memory footprint: only a
+    `chunk`-row slice of any per-edge tensor is live at once. A `lax.scan` streams the
+    edges; the node aggregations (edge-axis `segment_sum`s) accumulate in the scan
+    carry, and the node MLP runs once afterwards on the aggregated nodes. `remat=True`
+    recomputes each tile's activations in the backward pass instead of storing them.
 
-    The two node aggregations are `segment_sum`s -- reductions over the edge axis --
-    so they accumulate across tiles in the scan CARRY (sum is associative; the easy
-    case). `updated_edges` is the scan's stacked output. The node MLP runs ONCE
-    afterwards on the aggregated `[N, 3L]` (N<<E, cheap). `remat=True` wraps the scan
-    body so each tile's `[chunk, hidden]` activations are recomputed in the backward
-    rather than stashed per iteration.
+    `inner` keeps its original weights, so this is a pure call-time transform swapped
+    in via `eqx.tree_at`. Same call signature and outputs as `inner`.
 
-    Injected by `tree_at`, reusing `inner`'s ported weights -- no new params, nothing
-    copied from torch. Implements only the released orb-v3 path (no conditioning,
-    sigmoid gate); asserts anything else, since softmax would need a two-pass
-    `segment_softmax` (a global per-node denominator before the weighted sum).
+    Supports the sigmoid gate with optional *additive* charge/spin conditioning on
+    nodes and/or edges (the orbmol_v2 config). Raises `NotImplementedError` for the
+    `softmax` gate (its per-node denominator can't be formed in a single streaming
+    pass) and for `concatenative` conditioning (it widens the tiled edge/attn inputs).
     """
 
     inner: eqx.Module
@@ -110,51 +92,77 @@ class ChunkedStack(eqx.Module):
 
     def __call__(self, nodes, edges, senders, receivers, cutoff,
                  *, cond_nodes=None, cond_edges=None):
-        m = self.inner
-        if m._node_cond != "none" or m._edge_cond != "none":
-            raise NotImplementedError("ChunkedStack supports conditioning='none' only.")
-        if m._attention_gate != "sigmoid":
+        stack = self.inner
+        if stack._node_cond not in ("none", "additive") or stack._edge_cond not in ("none", "additive"):
+            raise NotImplementedError(
+                "ChunkedStack supports conditioning 'none'/'additive' only; "
+                f"got node={stack._node_cond!r} edge={stack._edge_cond!r} "
+                "(concatenative would widen the tiled edge/attn inputs)."
+            )
+        if stack._attention_gate != "sigmoid":
             raise NotImplementedError("ChunkedStack tiles the sigmoid gate only.")
-        E, N, T, L = edges.shape[0], nodes.shape[0], self.chunk, m.latent_dim
-        if T <= 0 or T >= E:  # no-op fast path -> exact original call
-            return m(nodes, edges, senders, receivers, cutoff,
-                     cond_nodes=cond_nodes, cond_edges=cond_edges)
 
-        pad = (-E) % T
+        n_edges, n_nodes = edges.shape[0], nodes.shape[0]
+        tile_size, latent_dim = self.chunk, stack.latent_dim
+        if tile_size <= 0 or tile_size >= n_edges:  # no tiling needed -> exact original call
+            return stack(nodes, edges, senders, receivers, cutoff,
+                         cond_nodes=cond_nodes, cond_edges=cond_edges)
 
-        def padrows(x, fill=0):
-            return jnp.pad(x, [(0, pad)] + [(0, 0)] * (x.ndim - 1), constant_values=fill)
+        # Additive node conditioning folds onto the small [N, L] nodes once, up front:
+        # this conditioned `nodes` feeds both the gathers and the node residual, exactly
+        # as the un-chunked stack does. (Edge conditioning is applied per tile, below.)
+        if stack._node_cond == "additive" and cond_nodes is not None:
+            nodes = nodes + stack._cond_node_proj(cond_nodes)
+        condition_edges = stack._edge_cond == "additive" and cond_edges is not None
 
-        # Pad senders/receivers with N: segment_sum drops ids >= num_segments, so the
-        # padding rows vanish from the aggregation; the OOB gather they trigger clamps
-        # to a valid row whose (unused) result is sliced off the edge output below.
-        e_t = padrows(edges).reshape(-1, T, edges.shape[-1])
-        s_t = padrows(senders, N).reshape(-1, T)
-        r_t = padrows(receivers, N).reshape(-1, T)
-        c_t = padrows(cutoff).reshape(-1, T, cutoff.shape[-1])
+        n_pad = (-n_edges) % tile_size
+
+        def pad_rows(x, fill=0):
+            return jnp.pad(x, [(0, n_pad)] + [(0, 0)] * (x.ndim - 1), constant_values=fill)
+
+        def to_tiles(x):
+            return pad_rows(x).reshape(-1, tile_size, *x.shape[1:])
+
+        # Pad sender/receiver ids with N: segment_sum drops ids >= num_segments, so the
+        # padding rows vanish from the aggregation; the out-of-bounds gather they trigger
+        # clamps to a valid row whose (unused) result is sliced off the edge output below.
+        edge_tiles = to_tiles(edges)
+        sender_tiles = pad_rows(senders, n_nodes).reshape(-1, tile_size)
+        receiver_tiles = pad_rows(receivers, n_nodes).reshape(-1, tile_size)
+        cutoff_tiles = to_tiles(cutoff)
+        # cond_edges rides along as a tiled input so its projection stays O(chunk); a
+        # zero placeholder keeps the scan signature uniform when there's no edge cond.
+        cond_edge_tiles = to_tiles(cond_edges if condition_edges else jnp.zeros_like(edges))
 
         def body(carry, tile):
-            agg_send, agg_recv = carry
-            e, s, r, c = tile
-            send_attn = jax.nn.sigmoid(m._send_attn(e))
-            recv_attn = jax.nn.sigmoid(m._receive_attn(e))
-            if m._distance_cutoff:
-                send_attn, recv_attn = send_attn * c, recv_attn * c
-            ef = jnp.concatenate([e, nodes[s], nodes[r]], axis=-1)  # [T, 3L]
-            ue = m._edge_mlp(ef)  # [T, L]; the [T, hidden] activations are streamed
-            agg_send = agg_send + jax.ops.segment_sum(ue * send_attn, s, N)
-            agg_recv = agg_recv + jax.ops.segment_sum(ue * recv_attn, r, N)
-            return (agg_send, agg_recv), ue
+            sent_agg, received_agg = carry
+            edge, sender, receiver, cutoff_tile, cond_edge = tile
+            if condition_edges:
+                edge = edge + stack._cond_edge_proj(cond_edge)  # feeds attn + edge mlp
+            send_attn = jax.nn.sigmoid(stack._send_attn(edge))
+            recv_attn = jax.nn.sigmoid(stack._receive_attn(edge))
+            if stack._distance_cutoff:
+                send_attn, recv_attn = send_attn * cutoff_tile, recv_attn * cutoff_tile
+            edge_mlp_input = jnp.concatenate([edge, nodes[sender], nodes[receiver]], axis=-1)
+            edge_update = stack._edge_mlp(edge_mlp_input)
+            sent_agg = sent_agg + jax.ops.segment_sum(edge_update * send_attn, sender, n_nodes)
+            received_agg = received_agg + jax.ops.segment_sum(edge_update * recv_attn, receiver, n_nodes)
+            # Carry out the new edge value (conditioned edge + update) so the scan's
+            # stacked output is the residual edges directly -- matches `edges + updated_edges`.
+            return (sent_agg, received_agg), edge + edge_update
 
         scan_body = jax.checkpoint(body) if self.remat else body
-        zeros = jnp.zeros((N, L), dtype=nodes.dtype)
-        (agg_send, agg_recv), ue_t = jax.lax.scan(scan_body, (zeros, zeros), (e_t, s_t, r_t, c_t))
+        zeros = jnp.zeros((n_nodes, latent_dim), dtype=nodes.dtype)
+        (sent_agg, received_agg), new_edge_tiles = jax.lax.scan(
+            scan_body, (zeros, zeros),
+            (edge_tiles, sender_tiles, receiver_tiles, cutoff_tiles, cond_edge_tiles),
+        )
 
-        updated_edges = ue_t.reshape(-1, L)[:E]
+        new_edges = new_edge_tiles.reshape(-1, latent_dim)[:n_edges]
         # Original order: node_features = [nodes, received_attributes, sent_attributes].
-        node_features = jnp.concatenate([nodes, agg_recv, agg_send], axis=-1)
-        updated_nodes = m._node_mlp(node_features)
-        return nodes + updated_nodes, edges + updated_edges
+        node_features = jnp.concatenate([nodes, received_agg, sent_agg], axis=-1)
+        updated_nodes = stack._node_mlp(node_features)
+        return nodes + updated_nodes, new_edges
 
 
 def chunk_stacks(model, chunk: int, *, remat: bool = True):
@@ -171,8 +179,8 @@ def chunk_stacks(model, chunk: int, *, remat: bool = True):
 
 
 def chunk_encoder_edge(model, chunk: int, *, remat: bool = True):
-    """Stream the encoder's `edge_fn` (same `[E, hidden]` shape as a stack edge MLP,
-    the leading full-E term once the stacks are chunked). Pure map -> reuse `ChunkedMLP`.
+    """Wrap the encoder's `edge_fn` in a `ChunkedMLP` so it too streams over the edge
+    axis (the leading full-edge term once the stacks are chunked).
     """
     return eqx.tree_at(
         lambda m: m.gns._encoder.edge_fn,
@@ -181,23 +189,10 @@ def chunk_encoder_edge(model, chunk: int, *, remat: bool = True):
     )
 
 
-# Gradient checkpointing is applied purely from the outside, by swapping
-# `eqx.filter_checkpoint`-wrapped callables into the dynamic `gnn_stacks` list
-# via `eqx.tree_at`. The library `MoleculeGNS.__call__`
-# (`for gnn in self.gnn_stacks: gnn(...)`) is never touched -- the port stays
-# pristine. `filter_checkpoint` returns an `eqx.Module` that partitions array
-# params from static config itself, so wrapping a module instance directly (closed
-# over as its `_fun`) is equivalent to passing it as an argument -- same residual
-# set, same gradients (verified by `.scripts/debug/confirm_stack_residuals.py`).
-
-
 def _checkpoint_stacks(model):
-    """Outer remat: drop & recompute each whole stack's activations in backward.
-
-    Reclaims the entire `__call__` body (gathers, concat, edge/node MLPs, attn),
-    leaving only the per-stack input (`nodes`, `edges`) as the saved boundary.
-    This is the dominant lever -- it removes the depth (num_message_passing)
-    multiplier on activation memory.
+    """Checkpoint every gnn stack: recompute each stack's `__call__` body in the
+    backward, keeping only the per-stack inputs (`nodes`, `edges`) as the saved
+    boundary. Removes the depth (num_message_passing) multiplier on activation memory.
     """
     return eqx.tree_at(
         lambda m: m.gns.gnn_stacks,
@@ -207,15 +202,11 @@ def _checkpoint_stacks(model):
 
 
 def _checkpoint_encoder(model):
-    """Remat the (un-looped) encoder: drop & recompute its node/edge MLP
-    activations in the backward pass.
+    """Checkpoint the encoder: recompute its node/edge MLP activations in the backward.
 
-    Unlike the stacks, the encoder runs ONCE *before* the message-passing loop,
-    so its `[E, mlp_hidden_dim]` edge-MLP (and `[N, mlp_hidden_dim]` node-MLP)
-    activations are otherwise held live across every stack AND both grad
-    traversals (the reverse pass in `_energy_and_grads` and the jvp in
-    `surrogate`). That makes it a fixed memory floor the per-stack checkpoint
-    never reaches -- this is the lever for that floor.
+    The encoder runs once before the message-passing loop, so its activations would
+    otherwise stay live across every stack and both grad traversals -- a memory floor
+    the per-stack checkpoint never reaches.
     """
     return eqx.tree_at(
         lambda m: m.gns._encoder,
@@ -225,10 +216,8 @@ def _checkpoint_encoder(model):
 
 
 def _checkpoint_full(model):
-    """Encoder remat composed with per-stack remat: removes both the depth
-    multiplier (the stacks) and the encoder floor in one model. The two swaps are
-    independent (the encoder is not inside `gnn_stacks`), so order is irrelevant;
-    we checkpoint the stacks last for symmetry with `_checkpoint_nested`.
+    """Checkpoint the encoder and every stack: removes both the depth multiplier and
+    the encoder floor. The two swaps are independent, so order is irrelevant.
     """
     return _checkpoint_stacks(_checkpoint_encoder(model))
 
@@ -247,20 +236,29 @@ def convert_to_chunked(
     *,
     chunk: int = 0,
     chunk_encoder: bool = False,
+    chunk_remat: bool = True,
     checkpoint: bool = False,
     ckpt_mode: str = "stack",
 ):
     """Apply the chunking + checkpointing memory levers to a built model.
 
-    The single entry point shared by the benchmark and the finetuning script. The
-    order is fixed and load-bearing: chunk FIRST (while the stacks are still plain
-    `AttentionInteractionNetwork`s whose `_edge_mlp` etc. resolve), then checkpoint
-    (which may wrap the stacks in opaque modules).
+    Chunks first (while the stacks are still plain `AttentionInteractionNetwork`s whose
+    `_edge_mlp` etc. resolve), then checkpoints (which may wrap the stacks in opaque
+    modules) -- this order is load-bearing.
 
     Args:
         model: a built `ConservativeRegressor` (random or ported weights).
         chunk: edge-axis tile width for `ChunkedStack`. 0 disables chunking.
         chunk_encoder: also stream the encoder's `edge_fn` (no effect if `chunk==0`).
+        chunk_remat: recompute each tile in the backward pass instead of storing it
+            (no effect if `chunk==0`). Effectively mandatory whenever the energy is
+            differentiated -- which is *every* path in this conservative model, since
+            forces are `-dE/dpos`. A `lax.scan`'s reverse pass otherwise materialises
+            every tile's residuals as dense stacked arrays (`O(n_edges)`, and unlike
+            the fused unchunked stack XLA can't free them), so `chunk` + `False`
+            OOMs *worse* than no chunking at all. Only set `False` for a genuinely
+            forward-only call (none exists here today); it trades the ~50% recompute
+            cost for that blow-up otherwise.
         checkpoint: enable activation rematerialisation.
         ckpt_mode: which policy from `CHECKPOINTERS` (only used if `checkpoint`).
 
@@ -283,9 +281,9 @@ def convert_to_chunked(
                 f"{ckpt_mode!r} (which reaches into s._edge_mlp) is incompatible; "
                 "use none/stack/stack_manual/encoder/full."
             )
-        model = chunk_stacks(model, chunk)
+        model = chunk_stacks(model, chunk, remat=chunk_remat)
         if chunk_encoder:
-            model = chunk_encoder_edge(model, chunk)
+            model = chunk_encoder_edge(model, chunk, remat=chunk_remat)
     if checkpoint:
         model = CHECKPOINTERS[ckpt_mode](model)
     return model

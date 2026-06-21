@@ -53,6 +53,7 @@ from orb_models.forcefield.models.jax.forcefield_heads import (
     LatentChargeHead,
     LatentSpinHead,
 )
+from orb_models.forcefield.models.jax.optimisation import convert_to_chunked
 from orb_models.forcefield.models.jax.pair_repulsion import ZBLBasis
 
 LATENT, STEPS, N_LAYERS, HIDDEN, NUM_BASES = 8, 2, 2, 16, 8
@@ -182,6 +183,34 @@ def test_orbmol_v2_regressor_matches_torch(helpers, key, use_spins):
     helpers.assert_close(preds.energy, out["interaction_energy"])
     jax_absolute = jax_model.energy_head.absolute_energy(preds.energy, jax_graph)
     helpers.assert_close(jax_absolute, out["energy"])
+    helpers.assert_close(preds.forces, out["forces"])
+    jax_stress_voigt = torch_full_3x3_to_voigt_6_stress(torch.tensor(np.asarray(preds.stress)))
+    helpers.assert_close(jnp.asarray(jax_stress_voigt.numpy()), out["stress"])
+
+
+@pytest.mark.parametrize(
+    "checkpoint, ckpt_mode",
+    [(False, "stack"), (True, "full")],
+    ids=["chunk_only", "chunk_plus_checkpoint"],
+)
+def test_orbmol_v2_chunked_matches_torch(helpers, key, checkpoint, ckpt_mode):
+    """The edge-axis memory levers must not change orbmol_v2's outputs: a chunked
+    (and optionally checkpointed) jax regressor reproduces the torch reference's
+    energy/forces/stress exactly. chunk=4 with E=6 exercises the padded last tile."""
+    torch_model, jax_model = _build(key)
+    jax_model = helpers.copy_conservative_regressor(jax_model, torch_model)
+    jax_model = convert_to_chunked(
+        jax_model, chunk=4, chunk_encoder=True, checkpoint=checkpoint, ckpt_mode=ckpt_mode
+    )
+
+    a = _arrays()
+    torch_graph = _torch_graph(a)
+    jax_graph = jgb.to_jax(torch_graph)
+
+    out = torch_model(torch_graph, fp64_energy=True)
+    preds = predict(jax_graph, jax_model, has_stress=True)
+
+    helpers.assert_close(preds.energy, out["interaction_energy"])
     helpers.assert_close(preds.forces, out["forces"])
     jax_stress_voigt = torch_full_3x3_to_voigt_6_stress(torch.tensor(np.asarray(preds.stress)))
     helpers.assert_close(jnp.asarray(jax_stress_voigt.numpy()), out["stress"])
