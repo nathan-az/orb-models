@@ -2,6 +2,12 @@
 
 Throughput / memory benchmarks for the **JAX port** of the orb forcefields against the **torch** reference, for both **training** and **inference**. The JAX model code lives in the library (`orb_models/{forcefield,common}/models/jax`); this directory is only the harness. Numbers below are from the bundled `run_benchmarks.sh` scripts and live in MLflow (experiments `orb-v3-train-comparison` and `orbmol-v2-inference-comparison`).
 
+## TLDR
+
+The jax path offers significant memory advantages in both training and inference. In inference, runtimes are closer, but memory levers unlock inference on much larger systems. In inference, jax runtimes are much stronger, and memory levers and the alternative JVP path similarly unlock training on much larger systems.
+
+Note that much of jax's benefits come from its jit which requires static shapes. As such, benchmarks are run with jax using padding, while PyTorch does not (even with compile, PyTorch supports dynamic shapes). In spite of the excess, jax appears to come out on top.
+
 ## Motivation
 
 The port exists to get two things torch does not give us easily:
@@ -21,8 +27,6 @@ The key lever differs by workload:
 - **Hardware:** RTX 3080, 10 GB. **Precision:** fp32 with TF32 matmuls (`high`) on both frameworks — orb's loader default; pass `precision=highest` (and `matmul_precision=highest`) for true fp32.
 - torch and JAX cannot share a CUDA context in one process, so every run is **one framework per process**. Weights are random at released dims (a shape / memory / throughput question, not a parity one).
 - Run: `training/run_benchmarks.sh /path/to/ase.db` and `inference/run_benchmarks.sh`.
-
-A note on metric names (they differ between the two harnesses): training logs **`median_step_time`** (seconds) and **`peak_mem_gb`**; inference logs **`force_median_ms`** (device step, ms), **`prep_median_ms`** (host neighbour-list build, ms) and **`peak_mem_mib`**. `atoms/s` is derived here (real atoms in the measured step ÷ step time) and is not stored in MLflow.
 
 ---
 
@@ -73,7 +77,7 @@ The MD inner loop on synthetic aqueous NaCl(aq) with **OrbMol-v2** (periodic PME
 | `jax-base` | — | **125** | 2609 | **11800** |
 | `jax-base-checkpoint=full` | ckpt=full | 187 | **992** | 7900 |
 
-JAX's device step is the fastest and ~1.6× leaner than torch; `torch.compile` does not help at this size (it is slower). The checkpoint lever trades ~1.5× step time for **2.6× less memory** (2609 → 992 MiB). (Host neighbour-list `prep` is higher for JAX — ~33 vs ~14 ms — so wall-clock totals are closer; `prep` is a CPU harness artifact, the device `force` step is the framework comparison.)
+JAX's device step is the fastest and ~1.6× leaner than torch; `torch.compile` does not help at this size (it is slower). The checkpoint lever trades ~1.5× step time for **2.6× less memory** (2609 → 992 MiB).
 
 **Large size** (`n_side=11`, 3837 atoms):
 
