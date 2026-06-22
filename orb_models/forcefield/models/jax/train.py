@@ -38,7 +38,7 @@ from orb_models.forcefield.models.jax.conservative_regressor import (
 
 # The two interchangeable d(loss)/d(model) paths. `compute_grads_jvp` is the
 # default everywhere; `compute_grads_reverse` exists so the benchmark can time
-# the naive reverse-over-reverse path against the forward-over-reverse one.
+# the naive reverse-over-reverse path against the reverse-over-forward one.
 GradFn = type(compute_grads_jvp)
 
 
@@ -156,7 +156,7 @@ def train_step(
     side-effect-inside-the-loss made explicit), then the loss/grads are taken on
     that updated model -- so the normalization the loss uses is this step's stats.
 
-    `grad_fn` selects the gradient path; it defaults to the forward-over-reverse
+    `grad_fn` selects the gradient path; it defaults to the reverse-over-forward
     `compute_grads_jvp` and can be swapped for `compute_grads_reverse` (same
     signature) to benchmark the naive path. The partition below drops any buffer
     grads, so either path is safe here.

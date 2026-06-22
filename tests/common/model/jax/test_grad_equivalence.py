@@ -1,5 +1,5 @@
 """d(loss)/d(model) three ways must agree: torch backward, jax reverse-over-reverse,
-jax forward-over-reverse (jvp) -- on the trainable partition only.
+jax reverse-over-forward (grad of a jvp) -- on the trainable partition only.
 
 The loss depends on the frozen buffers (energy - reference; every term divides by a
 normalizer std), so reverse-mode returns nonzero grads for those leaves while jvp

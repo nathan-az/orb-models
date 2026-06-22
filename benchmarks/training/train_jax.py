@@ -105,7 +105,7 @@ class JaxTrainConfig:
     energy_loss_weight: float = 1.0
     forces_loss_weight: float = 10.0
     stress_loss_weight: float = 1.0
-    method: str = "jax_jvp"  # jax_jvp (forward-over-reverse) | jax_reverse
+    method: str = "jax_jvp"  # jax_jvp (reverse-over-forward) | jax_reverse
     grad_accum_steps: int = 1  # buckets per optimiser update
     # --- memory levers (forwarded to convert_to_chunked) --------------------
     layer_chunk_size: int = 0  # edge-axis tile width (0 disables)

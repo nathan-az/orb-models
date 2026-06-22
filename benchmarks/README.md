@@ -19,7 +19,7 @@ Each benchmark therefore has two parts: a **raw framework comparison** at a base
 
 The key lever differs by workload:
 
-- **Training** — the loss needs a *second* derivative (energy → force is the first; the loss-grad is the second). Forward-over-reverse (**`jax_jvp`**) plus **edge chunking** tiles the dominant per-edge second-derivative buffers. Reverse-mode is faster at the base size but cannot be chunked (XLA already auto-remats it), so it OOMs at scale.
+- **Training** — the loss needs a *second* derivative (energy → force is the first; the loss-grad is the second). Reverse-over-forward (**`jax_jvp`** — grad of a jvp) plus **edge chunking** tiles the dominant per-edge second-derivative buffers. Reverse-mode is faster at the base size but cannot be chunked (XLA already auto-remats it), so it OOMs at scale.
 - **Inference** — forces are a single VJP, so the lever is plain **activation checkpointing** of the GNN stacks, recomputing them in the force backward.
 
 ## Setup

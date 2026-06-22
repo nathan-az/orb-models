@@ -21,7 +21,7 @@ Two ways to get d(loss)/d(model), both built on the same `_total_loss`:
     compute_grads_reverse  naive reverse-over-reverse (differentiate the loss,
                            which itself contains the inner energy->forces grad).
                            Simple; the reference for correctness tests.
-    compute_grads_jvp      forward-over-reverse. The loss only needs directional
+    compute_grads_jvp      reverse-over-forward (grad of a jvp). The loss only needs directional
                            derivatives of E, not the full mixed Hessian. We
                            contract each derivative term against a frozen
                            cotangent and push all of them through E in ONE
@@ -509,7 +509,7 @@ def compute_grads_jvp(
     has_stress: bool = True,
     loss_model: ConservativeRegressor | None = None,
 ) -> tuple[ConservativeRegressor, dict[str, jax.Array]]:
-    """Forward-over-reverse: cotangents from `jax.grad`, one jvp through E.
+    """Reverse-over-forward (grad of a jvp): cotangents from `jax.grad`, one jvp through E.
 
     d(loss)/d(model) = <dL/d energy, d energy/d model>          (zeroth order)
                      + <dL/d(dE/dX), d(dE/dX)/d model>  for X in {pos, disp, gen}

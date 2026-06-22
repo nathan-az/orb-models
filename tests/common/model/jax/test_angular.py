@@ -117,8 +117,10 @@ def test_spherical_harmonics_lmax_guard():
 def test_stable_normalize_second_order_consistency(vectors):
     """forward-over-reverse (jvp of grad) must equal reverse-over-reverse (hessian).
 
-    This is exactly the equivalence the force-loss training step relies on when
-    swapping the naive double-backward for the jvp-of-grad force path.
+    Tests the mixed-partial equivalence the force-loss training step relies on when
+    swapping the naive double-backward for the single-forward force path. (The step
+    itself uses the mirror ordering, reverse-over-forward / grad-of-jvp; by symmetry
+    of mixed partials the same equivalence holds either way.)
     """
     g = lambda x: jnp.sum(jnp.sin(StableNormalize()(x)))
     x = jnp.asarray(vectors)
