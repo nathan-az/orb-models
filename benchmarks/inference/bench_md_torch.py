@@ -35,6 +35,24 @@ class TorchStepper:
             has_electrostatics=True, device=self.dev,
             checkpoint=(None if cfg.checkpoint in _CKPT_OFF else cfg.checkpoint),
         ).eval()
+        if cfg.checkpoint not in _CKPT_OFF:
+            # CheckpointedSequential only remats when self.training is True
+            # in eval(), activation checkpointing is a silent no-op even
+            # though the force backward would benefit. Ungate it by flipping ONLY those
+            # submodules to train mode (they're Linear+activation stacks; layer_norm is
+            # a sibling, not inside them), and force any dropout within back to eval so
+            # the result stays deterministic and we isolate the checkpoint effect.
+            from orb_models.common.models.nn_util import CheckpointedSequential
+
+            n_ckpt = 0
+            for m in self.model.modules():
+                if isinstance(m, CheckpointedSequential):
+                    m.train()
+                    for sub in m.modules():
+                        if isinstance(sub, torch.nn.Dropout):
+                            sub.eval()
+                    n_ckpt += 1
+            print(f"[ckpt] ungated eval-mode checkpointing on {n_ckpt} module(s)")
         if cfg.compile:
             # dynamic=True: one compile over symbolic shapes -> no recompile as the
             # edge count changes step to step (the torch answer to JAX's padding).

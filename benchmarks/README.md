@@ -4,7 +4,7 @@ Throughput / memory benchmarks for the **JAX port** of the orb forcefields again
 
 ## TLDR
 
-The jax path offers significant memory advantages in both training and inference. In inference, runtimes are closer, but memory levers unlock inference on much larger systems. In inference, jax runtimes are much stronger, and memory levers and the alternative JVP path similarly unlock training on much larger systems.
+The JAX path offers significant memory and runtime advantages in both training and inference. In inference, JAX is faster and ~1.6× leaner, and activation checkpointing unlocks system sizes neither torch nor un-checkpointed JAX can fit. In training, JAX is faster at matched size, and the memory levers (reverse-over-forward + edge chunking) similarly unlock training on much larger systems than torch can reach.
 
 Note that much of jax's benefits come from its jit which requires static shapes. As such, benchmarks are run with jax using padding, while PyTorch does not (even with compile, PyTorch supports dynamic shapes). In spite of the excess, jax appears to come out on top.
 
@@ -72,17 +72,21 @@ The MD inner loop on synthetic aqueous NaCl(aq) with **OrbMol-v2** (periodic PME
 
 | Run | lever | force step (ms) | peak (MiB) | atoms/s |
 |---|---|---|---|---|
-| `torch-base-compile-false` | — | 135 | 4209 | 10900 |
-| `torch-base-compile-true` | — | 156 | 4046 | 9450 |
-| `jax-base` | — | **125** | 2609 | **11800** |
-| `jax-base-checkpoint=full` | ckpt=full | 187 | **992** | 7900 |
+| `torch-base-compile-false` | — | 110 | 4209 | 13400 |
+| `torch-base-compile-true` | — | 129 | 4046 | 11400 |
+| `torch-base-checkpoint=non-reentrant` | ckpt (non-reentrant) | 139 | 2936 | 10600 |
+| `torch-base-checkpoint=non-reentrant-compile` | ckpt + compile | 123 | 2758 | 12000 |
+| `jax-base` | — | **102** | 2609 | **14400** |
+| `jax-base-checkpoint=full` | ckpt=full | 154 | **992** | 9590 |
 
-JAX's device step is the fastest and ~1.6× leaner than torch; `torch.compile` does not help at this size (it is slower). The checkpoint lever trades ~1.5× step time for **2.6× less memory** (2609 → 992 MiB).
+JAX's device step is slightly faster and ~1.6× leaner than un-checkpointed torch (2609 vs 4209 MiB); `torch.compile` does not help at this size (it is slower). The checkpoint lever is where the two frameworks diverge sharply: JAX's `checkpoint=full` trades ~1.5× step time for **2.6× less memory** (2609 → 992 MiB), whereas torch's activation checkpointing only reaches ~1.4× (4209 → 2936 MiB, or 4046 → 2758 MiB with compile). Notably, **torch's *checkpointed* peak (2936 MiB) is still above un-checkpointed JAX (2609 MiB)** and nearly 3× JAX's checkpointed peak — the JAX remat lever is far more effective.
+
+> **Note:** we should not conclude here that JAX is strictly faster. JAX incurs additional prep time due to leveraging the existing torch utils for constructing the graph, requiring padding and conversion in the realm of 10-20ms. Realistically, runtime is about at parity. However the memory gains are real.
 
 **Large size** (`n_side=11`, 3837 atoms):
 
 | Run | lever | force step (ms) | peak (MiB) | atoms/s |
 |---|---|---|---|---|
-| `jax-large-checkpointed` | ckpt=full | 476 | 2406 | 8060 |
+| `jax-large-checkpointed` | ckpt=full | 391 | 2406 | 9820 |
 
 3837 atoms fits in **2.4 GB** with checkpointing — a system size neither torch nor un-checkpointed JAX fits on the 10 GB card (the un-checkpointed ceiling is ~2880 atoms). The lever turns memory headroom into reachable system size at a predictable per-step cost.
