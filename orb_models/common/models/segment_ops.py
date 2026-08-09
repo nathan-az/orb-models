@@ -1,4 +1,6 @@
 import torch
+from torch.distributed import _functional_collectives as funcol
+from torch.distributed.device_mesh import DeviceMesh
 
 TORCHINT = [torch.int64, torch.int32, torch.int16, torch.int8, torch.uint8]
 
@@ -305,3 +307,11 @@ def split_prediction(pred: torch.Tensor, n_node: torch.Tensor):
         return torch.split(pred, n_node.cpu().tolist(), dim=0)
     else:
         raise ValueError(f"Unexpected length of prediction tensor: {len(pred)}")
+
+
+def distributed_segment_sum(
+    data: torch.Tensor, segment_ids: torch.Tensor, num_segments: int, mesh: DeviceMesh
+) -> torch.Tensor:
+    """Sum local edge shards into replicated node attributes."""
+    local_sum = segment_sum(data, segment_ids, num_segments)
+    return funcol.all_reduce(local_sum, "sum", mesh)
